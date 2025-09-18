@@ -1,4 +1,4 @@
-flask
+
 pandas
 numpy
 python-dotenv
@@ -8,4 +8,8 @@ ortools
 scikit-learn
 folium
 flask-login
+Flask>=2.3
+gunicorn>=21.2
+psycopg2-binary>=2.9    # só se você usa Postgres
+python-dotenv>=1.0
 
