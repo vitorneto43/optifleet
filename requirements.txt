@@ -1,4 +1,14 @@
+# Core
+SQLAlchemy>=2.0,<2.1
+alembic>=1.13  # opcional, para migrações
 
+# Servidor (produção/local)
+gunicorn>=21.2   # usado na Render (Linux)
+waitress>=3.0.0  # útil no Windows local, não atrapalha
+
+# Já estavam no seu arquivo, mantenha:
+Flask>=3.0
+flask-login>=0.6
 pandas
 numpy
 python-dotenv
@@ -7,9 +17,6 @@ googlemaps
 ortools
 scikit-learn
 folium
-flask-login
-Flask>=2.3
-gunicorn>=21.2
-psycopg2-binary>=2.9    # só se você usa Postgres
-python-dotenv>=1.0
+psycopg2-binary>=2.9
+
 
