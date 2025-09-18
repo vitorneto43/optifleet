@@ -11,7 +11,7 @@ from billing.asaas_webhook import bp_asaas_webhook
 from routes.fleet_routes import bp_fleet
 from routes.telemetry_routes import bp_tele
 from routes.reroute_routes import bp_reroute
-from routes.report_routes import bp_reports
+##from routes.report_routes import bp_reports
 from routes.notify_routes import bp_notify
 from routes.vendor_ingest_routes import bp_vendor
 from dotenv import load_dotenv

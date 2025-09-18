@@ -18,5 +18,8 @@ ortools
 scikit-learn
 folium
 psycopg2-binary>=2.9
+reportlab==4.2.5
+openpyxl>=3.1     # para exportar Excel
+pillow>=10.0      # imagens em PDFs (reportlab usa)
 
 
