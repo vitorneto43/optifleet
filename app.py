@@ -76,13 +76,12 @@ from functools import wraps
 def require_active_subscription(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if os.environ.get("PAYWALL_DISABLED") == "1":
-            # 👉 Libera sempre
-            return fn(*args, **kwargs)
+        if os.getenv("DEMO_MODE") == "1" or os.getenv("PAYWALL_DISABLED") == "1":
+            return fn(*args, **kwargs)  # SEM bloqueio
         if not current_user.is_authenticated:
-            return jsonify({"status":"unauthorized"}), 401
+            return jsonify({"status":"unauthorized","message":"Faça login"}), 401
         if not current_user.has_active_subscription():
-            return jsonify({"status":"forbidden"}), 403
+            return jsonify({"status":"forbidden","message":"Assinatura inativa. Assine um plano para usar a otimização."}), 403
         return fn(*args, **kwargs)
     return wrapper
 
