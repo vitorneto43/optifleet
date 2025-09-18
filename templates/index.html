@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OptiFleet — Dashboard</title>
+  <style>
+    :root{--bg:#0b132b;--card:#1c2541;--ink:#fff;--muted:#a0aec0;--acc:#3a86ff}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,Arial;margin:0;background:var(--bg);color:var(--ink)}
+    header{padding:16px 24px;background:#111827;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.08)}
+    header h1{margin:0;font-size:20px}
+    nav a{color:#fff;text-decoration:none;margin-left:14px;opacity:.9}
+    nav a:hover{opacity:1;text-decoration:underline}
+
+    main{padding:24px;display:grid;grid-template-columns:420px 1fr;gap:24px}
+    @media (max-width: 960px){ main{grid-template-columns:1fr} }
+
+    .card{background:var(--card);border-radius:12px;padding:20px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+    label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
+    input,select{width:100%;padding:8px 10px;border-radius:8px;border:none;margin-bottom:14px;background:#0b132b;color:#fff}
+
+    .row,.row3{display:grid;gap:12px}
+    .row{grid-template-columns:1fr 1fr}
+    .row3{grid-template-columns:1fr 1fr 1fr}
+
+    table{width:100%;border-collapse:collapse;font-size:14px;margin-top:12px}
+    th,td{text-align:left;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1)}
+
+    .btn{background:var(--acc);border:0;color:#fff;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px}
+    .btn.secondary{background:#6c757d}
+
+    iframe{width:100%;height:min(60vh,520px);border:0;border-radius:12px;background:#0b132b;margin-top:12px}
+
+    .muted{color:var(--muted)}
+    .danger{color:#ff6b6b}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OptiFleet — Dashboard</h1>
+    <nav>
+      {% if current_user.is_authenticated %}
+        <span style="opacity:.8;margin-right:12px;">{{ current_user.email }}</span>
+        <a href="/" style="color:#fff;margin-right:12px;text-decoration:none;">Dashboard</a>
+        <a href="/vehicles" style="color:#fff;margin-right:12px;text-decoration:none;">Frota</a>
+        <a href="/tracking" style="color:#fff;margin-right:12px;text-decoration:none;">Telemetria</a>
+        <a href="/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
+        <form method="post" action="/logout" style="display:inline;"><button class="btn secondary">Sair</button></form>
+      {% else %}
+        <a href="/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
+        <a href="/login" class="btn">Entrar</a>
+      {% endif %}
+    </nav>
+
+  </header>
+
+  <main>
+    {% if current_user.is_authenticated and current_user.has_active_subscription() %}
+      <!-- ✅ Usuário com acesso: mostra os formulários e resultados -->
+      <section class="card">
+        <h3>Depósito</h3>
+        <div class="row">
+          <div>
+            <label>Endereço (opcional se informar lat/lon)</label>
+            <input id="dep_address" placeholder="Rua ..., Cidade - UF">
+          </div>
+          <div class="row">
+            <div>
+              <label>Lat</label>
+              <input id="dep_lat" type="number" step="any" placeholder="-8.1735">
+            </div>
+            <div>
+              <label>Lon</label>
+              <input id="dep_lon" type="number" step="any" placeholder="-34.9176">
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Início janela</label>
+            <input id="dep_start" value="08:00">
+          </div>
+          <div>
+            <label>Fim janela</label>
+            <input id="dep_end" value="18:00">
+          </div>
+        </div>
+
+        <h3 style="margin-top:14px;">Veículos</h3>
+        <table id="vehTable">
+          <thead>
+            <tr>
+              <th>ID</th><th>Capacidade</th><th>Início</th><th>Fim</th>
+              <th>KM</th><th>Dias</th><th>Alertas</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <button class="btn secondary" onclick="addVehicle()">+ adicionar veículo</button>
+
+        <h3 style="margin-top:14px;">Paradas (clientes)</h3>
+        <table id="stopTable">
+          <thead>
+            <tr>
+              <th>ID</th><th>Veículo</th><th>Endereço</th><th>Lat</th><th>Lon</th>
+              <th>Demanda</th><th>Serv.(min)</th><th>TW início</th><th>TW fim</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <button class="btn secondary" onclick="addStop()">+ adicionar parada</button>
+
+        <h3 style="margin-top:14px;">Preferências</h3>
+        <div class="row">
+          <div>
+            <label>Objetivo</label>
+            <select id="objective">
+              <option value="min_cost">Minimizar custo</option>
+              <option value="min_time">Minimizar tempo</option>
+              <option value="min_distance">Minimizar distância</option>
+            </select>
+          </div>
+          <div>
+            <label>Incluir pedágios</label>
+            <select id="tolls">
+              <option value="true" selected>Sim</option>
+              <option value="false">Não</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn" onclick="optimize()">Otimizar</button>
+          <button class="btn secondary" onclick="loadSample()">Carregar Exemplo</button>
+        </div>
+        <div id="msg" class="danger" style="margin-top:8px;"></div>
+      </section>
+
+      <section class="card">
+        <h3>Resultado</h3>
+        <div id="summary" class="muted">Preencha os formulários e clique em Otimizar.</div>
+        <div style="margin-top:12px;">
+          <iframe id="mapFrame" src=""></iframe>
+        </div>
+
+        <h3 style="margin-top:18px;">Rotas</h3>
+        <table id="routesTable">
+          <thead><tr><th>Veículo</th><th>Ordem (nós)</th><th>Tempo (min)</th><th>Dist (km)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+
+        <h3 style="margin-top:18px;">Manutenção</h3>
+        <table id="maintTable">
+          <thead><tr><th>Veículo</th><th>Risco</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+    {% else %}
+      <!-- 🔒 Sem acesso: mostra CTA para login/planos -->
+      <section class="card">
+        <h3>Acesso restrito</h3>
+        <p>Faça login e ative um plano para utilizar a otimização de rotas.</p>
+        <p>
+          <a class="btn" href="/login">Entrar</a>
+          <a class="btn secondary" href="/pricing">Ver planos</a>
+        </p>
+      </section>
+      {% set hide_forms = True %}
+    {% endif %}
+  </main>
+
+
+<script>
+function q(id){ return document.getElementById(id) }
+
+function nextVehId(){
+  const rows = document.querySelectorAll("#vehTable tbody tr").length;
+  return "V" + (rows + 1);
+}
+function nextStopId(){
+  const rows = document.querySelectorAll("#stopTable tbody tr").length;
+  return "S" + (rows + 1);
+}
+
+function addVehicle(v={
+  id: nextVehId(), capacity:1200, start_time:"08:00", end_time:"18:00",
+  km_rodados:20000, dias:60, alertas:0
+}){
+  const tb = document.querySelector("#vehTable tbody");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input value="${v.id}"></td>
+    <td><input type="number" value="${v.capacity}"></td>
+    <td><input value="${v.start_time}"></td>
+    <td><input value="${v.end_time}"></td>
+    <td><input type="number" value="${v.km_rodados}"></td>
+    <td><input type="number" value="${v.dias}"></td>
+    <td><input type="number" value="${v.alertas}"></td>
+    <td><button class="btn secondary" onclick="this.closest('tr').remove()">remover</button></td>
+  `;
+  tb.appendChild(tr);
+}
+
+function addStop(s={id:"S"+(stopTable.rows.length), vehicle:"", address:"", lat:"", lon:"", demand:100, service_min:10, tw_start:"08:00", tw_end:"18:00"}){
+  const tb = document.querySelector("#stopTable tbody");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input value="${s.id}"></td>
+    <td><input placeholder="ex.: V1" value="${s.vehicle||""}"></td>
+    <td><input placeholder="Rua..., Cidade - UF" value="${s.address}"></td>
+    <td><input type="number" step="any" value="${s.lat}"></td>
+    <td><input type="number" step="any" value="${s.lon}"></td>
+    <td><input type="number" value="${s.demand}"></td>
+    <td><input type="number" value="${s.service_min}"></td>
+    <td><input value="${s.tw_start}"></td>
+    <td><input value="${s.tw_end}"></td>
+    <td><button class="btn secondary" onclick="this.closest('tr').remove()">remover</button></td>
+  `;
+  tb.appendChild(tr);
+}
+
+
+function loadSample(){
+  // depósito
+  q('dep_address').value = "Av. Boa Viagem, Recife - PE";
+  q('dep_lat').value = "-8.1735";
+  q('dep_lon').value = "-34.9176";
+  q('dep_start').value = "08:00";
+  q('dep_end').value = "18:00";
+
+  // limpa tabelas
+  document.querySelector("#vehTable tbody").innerHTML = "";
+  document.querySelector("#stopTable tbody").innerHTML = "";
+
+  addVehicle({id:"V1", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:22000, dias:45, alertas:0});
+  addVehicle({id:"V2", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:38000, dias:120, alertas:2});
+  addVehicle({id:"V3", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:12000, dias:20, alertas:0});
+
+  addStop({id:"S1", address:"Praça do Marco Zero, Recife - PE", lat:"", lon:"", demand:200, service_min:10, tw_start:"09:00", tw_end:"12:00"});
+  addStop({id:"S2", address:"Rua da Aurora, Recife - PE", lat:"", lon:"", demand:300, service_min:10, tw_start:"10:00", tw_end:"16:00"});
+  addStop({id:"S3", address:"Shopping RioMar Recife", lat:"", lon:"", demand:250, service_min:10, tw_start:"08:30", tw_end:"14:00"});
+  addStop({id:"S4", address:"UFPE - Recife", lat:"", lon:"", demand:150, service_min:10, tw_start:"08:00", tw_end:"18:00"});
+}
+
+function buildPayload(){
+  const depot = {
+    address: q('dep_address').value.trim() || undefined,
+    lat: q('dep_lat').value ? parseFloat(q('dep_lat').value) : undefined,
+    lon: q('dep_lon').value ? parseFloat(q('dep_lon').value) : undefined,
+    start_window: q('dep_start').value || "08:00",
+    end_window: q('dep_end').value || "18:00",
+  };
+
+  const vehicles = [...document.querySelectorAll("#vehTable tbody tr")].map(tr=>{
+    const tds = tr.querySelectorAll("td input");
+    return {
+      id: tds[0].value, capacity: parseInt(tds[1].value||"0"),
+      start_time: tds[2].value, end_time: tds[3].value,
+      _km: parseFloat(tds[4].value||"0"), _dias: parseFloat(tds[5].value||"0"), _alertas: parseFloat(tds[6].value||"0"),
+    };
+  });
+
+  const stops = [...document.querySelectorAll("#stopTable tbody tr")].map(tr=>{
+    const t = tr.querySelectorAll("td input");
+    return {
+      id: t[0].value,
+      vehicle: t[1].value || undefined,  // <- NOVO
+      address: t[2].value || undefined,
+      lat: t[3].value ? parseFloat(t[3].value) : undefined,
+      lon: t[4].value ? parseFloat(t[4].value) : undefined,
+      demand: parseInt(t[5].value||"0"),
+      service_min: parseInt(t[6].value||"0"),
+      tw_start: t[7].value, tw_end: t[8].value
+    };
+  });
+
+
+  const telemetry = {};
+  vehicles.forEach(v=>{
+    telemetry[v.id] = { km_rodados: v._km, dias_desde_ultima_manutencao: v._dias, alertas_obd: v._alertas };
+    delete v._km; delete v._dias; delete v._alertas;
+  });
+
+  return {
+    depot, vehicles, stops,
+    objective: q('objective').value,
+    include_tolls: q('tolls').value === "true",
+    telemetry
+  };
+}
+
+async function optimize(){
+  q('msg').textContent = "";
+  const body = buildPayload();
+
+  if(!((body.depot.lat && body.depot.lon) || body.depot.address)){
+    q('msg').textContent = "Informe endereço OU lat/lon do depósito.";
+    return;
+  }
+  if(body.vehicles.length === 0 || body.stops.length === 0){
+    q('msg').textContent = "Adicione pelo menos 1 veículo e 1 parada.";
+    return;
+  }
+  const res = await fetch('/optimize', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if(!res.ok){
+    q('msg').textContent = (data && data.message) ? data.message : "Erro durante a otimização.";
+    return;
+  }
+
+  document.getElementById('summary').innerHTML = `
+    <div><b>Status:</b> ${data.status}</div>
+    <div><b>Tempo total:</b> ${data.total_time_min} min</div>
+    <div><b>Distância total:</b> ${data.total_dist_km} km</div>
+    <div><b>Pedágios:</b> R$ ${data.total_toll_cost}</div>
+    <div><b>Mapa:</b> ${data.map_url ? `<a href="${data.map_url}" target="_blank" style="color:#ffd166">abrir em nova aba</a>` : '<span class="muted">não gerado</span>'}</div>
+  `;
+  document.getElementById('mapFrame').src = data.map_url || "";
+
+  const tbody = document.querySelector('#routesTable tbody');
+  tbody.innerHTML = "";
+  data.routes.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.vehicle_id}</td><td>${r.nodes.join(' ➜ ')}</td><td>${r.time_min}</td><td>${r.dist_km}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const mtbody = document.querySelector('#maintTable tbody');
+  mtbody.innerHTML = "";
+  data.maintenance.forEach(m=>{
+    const color = (m.failure_risk>=0.7?'#ff6b6b':(m.failure_risk>=0.4?'#ffd166':'#06d6a0'));
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${m.vehicle_id}</td><td style="color:${color}">${m.failure_risk}</td>`;
+    mtbody.appendChild(tr);
+  });
+}
+
+window.addEventListener('DOMContentLoaded', ()=>{
+  addVehicle();
+  addStop();
+});
+</script>
+</body>
+</html>
+

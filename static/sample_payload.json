@@ -1,0 +1,21 @@
+{
+  "depot": { "lat": -8.1735, "lon": -34.9176, "start_window": "08:00", "end_window": "18:00" },
+  "vehicles": [
+    { "id": "V1", "capacity": 1200, "start_time": "08:00", "end_time": "18:00", "speed_factor": 1.0 },
+    { "id": "V2", "capacity": 1200, "start_time": "08:00", "end_time": "18:00", "speed_factor": 1.0 },
+    { "id": "V3", "capacity": 1200, "start_time": "08:00", "end_time": "18:00", "speed_factor": 1.0 }
+  ],
+  "stops": [
+    { "id": "S1", "lat": -8.1287, "lon": -34.9049, "demand": 200, "service_min": 10, "tw_start": "09:00", "tw_end": "12:00" },
+    { "id": "S2", "lat": -8.0883, "lon": -34.9167, "demand": 300, "service_min": 10, "tw_start": "10:00", "tw_end": "16:00" },
+    { "id": "S3", "lat": -8.0695, "lon": -34.8847, "demand": 250, "service_min": 10, "tw_start": "08:30", "tw_end": "14:00" },
+    { "id": "S4", "lat": -8.0852, "lon": -34.8882, "demand": 150, "service_min": 10, "tw_start": "08:00", "tw_end": "18:00" }
+  ],
+  "objective": "min_cost",
+  "include_tolls": true,
+  "telemetry": {
+    "V1": { "km_rodados": 22000, "dias_desde_ultima_manutencao": 45, "alertas_obd": 0 },
+    "V2": { "km_rodados": 38000, "dias_desde_ultima_manutencao": 120, "alertas_obd": 2 },
+    "V3": { "km_rodados": 12000, "dias_desde_ultima_manutencao": 20, "alertas_obd": 0 }
+  }
+}

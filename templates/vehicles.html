@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OptiFleet — Frota</title>
+<style>
+  :root{--bg:#0b132b;--card:#1c2541;--muted:#a0aec0;--acc:#3a86ff;--ok:#06d6a0;--err:#ff6b6b}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:#fff}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+  .grid{display:grid;grid-template-columns:1fr 2fr;gap:16px}
+  .card{background:var(--card);padding:16px;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+  h1,h2{margin:.2rem 0 1rem}
+  label{font-size:12px;color:var(--muted)}
+  input,button,select{width:100%;padding:10px;border-radius:10px;border:0;margin:6px 0 12px}
+  button{background:var(--acc);color:#fff;cursor:pointer}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left;font-size:14px}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.1);font-size:12px}
+  .row-actions{display:flex;gap:8px}
+  .muted{color:var(--muted);font-size:12px}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+  /* modal */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center}
+  .modal .box{background:var(--card);padding:16px;border-radius:12px;min-width:320px;max-width:90vw}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Frota</h1>
+  <p class="muted">Cadastre veículos e vincule o <b>ID do rastreador (IMEI)</b> para habilitar telemetria.</p>
+
+  <div class="grid">
+    <!-- Criar veículo -->
+    <div class="card">
+      <h2>Novo veículo</h2>
+      <label>Código/Placa</label>
+      <input id="v_code" placeholder="ex.: ABC-1A23">
+      <label>Modelo</label>
+      <input id="v_model" placeholder="ex.: VM 270">
+      <label>Capacidade (kg)</label>
+      <input id="v_capacity" type="number" min="0" step="1" placeholder="ex.: 12000">
+      <label>Consumo médio (km/L)</label>
+      <input id="v_consumption" type="number" min="0" step="0.1" placeholder="ex.: 4.2">
+      <button onclick="createVehicle()">Cadastrar</button>
+      <div id="create_status" class="muted"></div>
+    </div>
+
+    <!-- Lista de veículos -->
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <h2>Veículos</h2>
+        <button onclick="loadVehicles()">Atualizar</button>
+      </div>
+      <table id="veh_table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Código</th>
+            <th>Modelo</th>
+            <th>Capacidade</th>
+            <th>Consumo</th>
+            <th>Rastreador</th>
+            <th>Ações</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="muted" id="list_status"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal vincular rastreador -->
+<div class="modal" id="modal">
+  <div class="box">
+    <h3>Vincular rastreador</h3>
+    <p class="muted">Informe o <b>ID/IMEI</b> do dispositivo rastreador.</p>
+    <input id="tracker_input" placeholder="ex.: 867584030112345">
+    <div class="row-actions">
+      <button onclick="bindTracker()">Salvar</button>
+      <button style="background:#4a5568" onclick="closeModal()">Cancelar</button>
+    </div>
+    <div id="bind_status" class="muted"></div>
+  </div>
+</div>
+
+<script>
+const api = {
+  listVehicles: () => fetch('/api/vehicles').then(r=>r.json()),
+  createVehicle: (payload) => fetch('/api/vehicles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.json()),
+  bindTracker: (id, tracker_id) => fetch(`/api/vehicles/${id}/bind_tracker`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({tracker_id})}).then(async r => {
+    const j = await r.json().catch(()=>({}));
+    return {ok:r.ok, data:j};
+  })
+};
+
+let currentVehicleId = null;
+
+async function loadVehicles(){
+  document.getElementById('list_status').textContent = 'Carregando...';
+  const data = await api.listVehicles();
+  const tb = document.querySelector('#veh_table tbody');
+  tb.innerHTML = '';
+  (data||[]).forEach(v=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${v.id}</td>
+      <td>${v.code}</td>
+      <td>${v.model||'-'}</td>
+      <td>${v.capacity??0}</td>
+      <td>${v.avg_consumption_km_l??0}</td>
+      <td>${v.tracker_id ? `<span class="pill">${v.tracker_id}</span>` : '<span class="muted">—</span>'}</td>
+      <td>
+        <div class="row-actions">
+          <button onclick="openModal(${v.id}, '${v.tracker_id||''}')">Vincular</button>
+        </div>
+      </td>`;
+    tb.appendChild(tr);
+  });
+  document.getElementById('list_status').textContent = (data||[]).length ? '' : 'Nenhum veículo cadastrado.';
+}
+
+async function createVehicle(){
+  const code = document.getElementById('v_code').value.trim();
+  const model = document.getElementById('v_model').value.trim();
+  const capacity = parseInt(document.getElementById('v_capacity').value||'0',10);
+  const avg = parseFloat(document.getElementById('v_consumption').value||'0');
+  if(!code){ setCreateStatus('Informe o código/placa.', true); return; }
+  const res = await api.createVehicle({code, model, capacity, avg_consumption_km_l: avg});
+  if(res.id){
+    setCreateStatus('Veículo criado ✓', false);
+    document.getElementById('v_code').value='';
+    document.getElementById('v_model').value='';
+    document.getElementById('v_capacity').value='';
+    document.getElementById('v_consumption').value='';
+    loadVehicles();
+  }else{
+    setCreateStatus('Erro ao criar (código duplicado?)', true);
+  }
+}
+function setCreateStatus(msg, isErr){
+  const el = document.getElementById('create_status');
+  el.textContent = msg; el.className = isErr ? 'err' : 'ok';
+}
+
+function openModal(vehicleId, currentTracker){
+  currentVehicleId = vehicleId;
+  document.getElementById('tracker_input').value = currentTracker||'';
+  document.getElementById('bind_status').textContent = '';
+  document.getElementById('modal').style.display = 'flex';
+}
+function closeModal(){
+  document.getElementById('modal').style.display = 'none';
+  currentVehicleId = null;
+}
+
+async function bindTracker(){
+  const t = document.getElementById('tracker_input').value.trim();
+  if(!t){ setBindStatus('Informe o ID/IMEI.', true); return; }
+  const {ok, data} = await api.bindTracker(currentVehicleId, t);
+  if(ok){
+    setBindStatus('Rastreador vinculado ✓', false);
+    await loadVehicles();
+    setTimeout(closeModal, 500);
+  }else{
+    setBindStatus(data.error || 'Falha ao vincular.', true);
+  }
+}
+function setBindStatus(msg, isErr){
+  const el = document.getElementById('bind_status');
+  el.textContent = msg; el.className = isErr ? 'err' : 'ok';
+}
+
+loadVehicles();
+</script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OptiFleet Tracking</title>
+<style>body{font-family:system-ui;margin:0;background:#0b132b;color:#fff}.card{max-width:640px;margin:16px auto;background:#1c2541;padding:16px;border-radius:12px}label{font-size:12px;opacity:.85}input,button{width:100%;padding:10px;border-radius:8px;border:0;margin:6px 0 12px}button{background:#3a86ff;color:#fff;cursor:pointer}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}.ok{color:#06d6a0}.err{color:#ff6b6b}.muted{opacity:.85;font-size:12px}</style>
+</head><body>
+<div class="card">
+  <h2>Rastreamento — OptiFleet</h2>
+  <label>ID do veículo</label>
+  <input id="vehicle" placeholder="ex.: 1">
+  <label>Token</label>
+  <input id="token" placeholder="Cole o token fornecido" />
+  <div class="row"><button onclick="start()">Iniciar</button><button onclick="stop()">Parar</button></div>
+  <div id="status" class="muted">Aguardando…</div>
+  <pre id="log" style="white-space:pre-wrap;font-size:12px;"></pre>
+</div>
+<script>
+let watchId=null,lastSent=0;
+function qs(k){return new URLSearchParams(location.search).get(k)}
+function log(t){ document.getElementById('log').textContent=(new Date()).toLocaleTimeString()+" - "+t+"\n"+document.getElementById('log').textContent;}
+function setStatus(html){ document.getElementById('status').innerHTML=html;}
+async function sendFix(vId, token, lat, lon, speed){
+  const now=Date.now(); if(now-lastSent<5000) return; lastSent=now;
+  const payload={vehicle_id:parseInt(vId,10),lat,lon,speed_kmh:(speed||0)*3.6,odometer_km:0,fuel_pct:0,engine_temp:0,obd_alerts:0};
+  const res=await fetch('/api/telemetry',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload)});
+  setStatus(res.ok?'<span class="ok">Enviado ✓</span>':'<span class="err">Falha</span>');
+}
+function start(){
+  const vId=document.getElementById('vehicle').value.trim();
+  const token=document.getElementById('token').value.trim();
+  if(!vId||!token){ setStatus('<span class="err">Preencha veículo e token.</span>'); return;}
+  if(!navigator.geolocation){ setStatus('<span class="err">Sem geolocalização.</span>'); return;}
+  watchId=navigator.geolocation.watchPosition(
+    pos=>{ const {latitude,longitude,speed}=pos.coords; setStatus(`Lat:${latitude.toFixed(6)} Lon:${longitude.toFixed(6)} Vel:${(speed||0).toFixed(1)} m/s`); sendFix(vId, token, latitude, longitude, speed||0); },
+    err=>setStatus('<span class="err">GPS: '+err.message+'</span>'),
+    {enableHighAccuracy:true,maximumAge:2000,timeout:10000}
+  ); log('tracking iniciado');
+}
+function stop(){ if(watchId!==null){navigator.geolocation.clearWatch(watchId); watchId=null; log('tracking parado'); setStatus('Parado'); } }
+window.addEventListener('load',()=>{
+  const v=qs('vehicle'), t=qs('token');
+  if(v) document.getElementById('vehicle').value=v;
+  if(t) document.getElementById('token').value=t;
+  if(v&&t) start();
+});
+</script>
+</body></html>

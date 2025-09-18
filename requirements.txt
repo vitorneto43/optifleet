@@ -1,0 +1,11 @@
+flask
+pandas
+numpy
+python-dotenv
+requests
+googlemaps
+ortools
+scikit-learn
+folium
+flask-login
+
