@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OptiFleet — Planos</title>
+  <style>
+    body { font-family: system-ui, Arial; margin:0; background:#0b132b; color:#fff; }
+    header { padding: 16px 24px; background:#1c2541; display:flex; align-items:center; justify-content:space-between; }
+    a { color:#fff; text-decoration:none; margin-left:14px; }
+    main { padding:24px; display:grid; grid-template-columns: 1fr 380px; gap:24px; }
+    .card { background:#1c2541; border-radius:12px; padding:18px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+    .prices { display:grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap:16px; }
+    .plan h3 { margin:4px 0 0; }
+    .price { font-size: 28px; margin: 8px 0 12px; }
+    .btn { background:#3a86ff; color:#fff; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; display:inline-block; }
+    .btn.secondary { background:#6c757d; }
+    .btn.disabled { pointer-events:none; opacity:.7; }
+    ul { margin:8px 0 0 18px; }
+    .muted { opacity:.85 }
+    .small { font-size:12px; }
+  </style>
+</head>
+<body>
+<header>
+  <div><b>OptiFleet</b></div>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/pricing">Planos</a>
+  </nav>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Escolha seu plano</h2>
+
+    <div class="prices">
+      <!-- STARTER -->
+      <div class="card plan">
+        <h3>Starter</h3>
+        <div class="muted">Até 10 veículos</div>
+        <div class="price">R$ 399/mês</div>
+        <ul class="small">
+          <li>Otimização de rotas</li>
+          <li>Mapa interativo</li>
+          <li>Relatórios básicos</li>
+        </ul>
+
+        {% if current_user.is_authenticated %}
+          <a class="btn" href="/?plan=starter">Assinar Starter</a>
+            Assinar Starter
+          </a>
+        {% else %}
+          <a class="btn" href="{{ url_for('auth.login_page', next='/pricing') }}">Entrar para assinar</a>
+        {% endif %}
+
+        <div style="margin-top:8px;">
+          <a class="btn secondary" target="_blank"
+             href="https://wa.me/5581992512747?text=Olá! Quero saber mais sobre o sistema de logística.">
+             💬 Fale com vendas
+          </a>
+        </div>
+      </div>
+
+      <!-- PRO -->
+      <div class="card plan">
+        <h3>Pro</h3>
+        <div class="muted">Até 50 veículos</div>
+        <div class="price">R$ 1.499/mês</div>
+        <ul class="small">
+          <li>Rotas multi-veículos</li>
+          <li>Pedágios, CO₂, custos</li>
+          <li>Manutenção preventiva</li>
+        </ul>
+
+        {% if current_user.is_authenticated %}
+          <a class="btn" href="/?plan=pro">Assinar Pro</a>
+            Assinar Pro
+          </a>
+        {% else %}
+          <a class="btn" href="{{ url_for('auth.login_page', next='/pricing') }}">Entrar para assinar</a>
+        {% endif %}
+
+        <div style="margin-top:8px;">
+          <a class="btn secondary" target="_blank"
+             href="https://wa.me/5581992512747?text=Olá! Quero saber mais sobre o sistema de logística.">
+             💬 Fale com vendas
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- ENTERPRISE -->
+    <div class="card" style="margin-top:14px;">
+      <h3>Enterprise</h3>
+      <div class="muted">Ilimitado • Integrações • Suporte premium</div>
+      <a class="btn secondary" target="_blank"
+         href="https://wa.me/5581992512747?text=Olá! Quero saber mais sobre o sistema de logística.">
+         Falar com vendas
+      </a>
+    </div>
+  </section>
+
+  <aside class="card">
+    <h2>Por que a OptiFleet?</h2>
+    <ul class="small">
+      <li>Até 25% menos km rodados com rotas inteligentes</li>
+      <li>Telemetria com alertas em tempo real</li>
+      <li>Relatórios de custos, pedágios e CO₂</li>
+      <li>Ativação rápida e suporte humano</li>
+    </ul>
+
+    <h3 style="margin-top:16px;">Dúvidas rápidas</h3>
+    <p class="small"><b>Posso cancelar quando quiser?</b> Sim, sem fidelidade.</p>
+    <p class="small"><b>Quais formas de pagamento?</b> Cartão, PIX e boleto via Asaas.</p>
+    <p class="small"><b>Precisa falar com alguém?</b> Clique em “Fale com vendas”.</p>
+
+    <div style="margin-top:12px;">
+      <a class="btn secondary" target="_blank"
+         href="https://wa.me/5581992512747?text=Olá! Quero saber mais sobre o sistema de logística.">
+         💬 Tirar dúvidas no WhatsApp
+      </a>
+    </div>
+  </aside>
+</main>
+
+<script>
+  document.querySelectorAll('.buy-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.textContent = 'Redirecionando…';
+      btn.classList.add('disabled');
+    });
+  });
+</script>
+</body>
+</html>
