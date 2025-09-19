@@ -1,48 +1,22 @@
 # billing/asaas_routes.py
-from flask import Blueprint, redirect, url_for, abort, jsonify
-from flask_login import login_required, current_user
-import os
-
-# ATENÇÃO: em demo NÃO chamamos Asaas nem requests.
-# Quando for ativar produção, descomente os imports e o bloco real.
-# import requests
+from flask import Blueprint, redirect, url_for
+from flask_login import login_required
 
 bp_asaas = Blueprint("billing", __name__, url_prefix="/billing")
 
-# Toggle de demonstração
-DEMO_MODE = os.getenv("DEMO_MODE", "1") == "1"   # <- deixe "1" enquanto estiver apresentando
-
-# Planos exibidos na UI (apenas informativo em DEMO_MODE)
-PLANS = {
-    "starter": {"name": "OptiFleet Starter", "value": 399.00, "cycle": "MONTHLY"},
-    "pro":     {"name": "OptiFleet Pro",     "value": 1499.00, "cycle": "MONTHLY"},
-}
-
-# Config Asaas (usado só em produção)
-ASAAS_API_KEY = os.environ.get("ASAAS_API_KEY", "")
-ASAAS_BASE = "https://www.asaas.com/api/v3"
-
-
 @bp_asaas.get("/buy/<plan_code>")
 @login_required
-def buy(plan_code: str):
-    """
-    Em DEMO:
-      - Não cria cliente/assinatura
-      - Apenas leva o usuário de volta ao dashboard
-    Em PRODUÇÃO:
-      - Descomente o bloco REAL e comente o bloco DEMO
-    """
-    plan = PLANS.get(plan_code)
-    if not plan:
-        abort(404)
+def buy(plan_code):
+    # DEMO absoluto: nunca chama Asaas, só volta pro dashboard
+    return redirect(url_for("home"))
+
 
     # ----------------------------
     # BLOCO DEMO (ativo)
     # ----------------------------
     # Ideia: permitir navegação e demonstração SEM cobrar nada.
     # Redireciona para o dashboard (ou para /pricing se preferir).
-    return redirect(url_for("home"))
+
     # return redirect(url_for("pricing"))
 
     # ---------------------------------------------------------

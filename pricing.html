@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OptiFleet — Planos</title>
   <style>
-    body { font-family: system-ui, Arial; margin:0; background:#0b132b; color:#fff; }
+    :root { color-scheme: dark; }
+    body { font-family: system-ui, Arial, sans-serif; margin:0; background:#0b132b; color:#fff; }
     header { padding: 16px 24px; background:#1c2541; display:flex; align-items:center; justify-content:space-between; }
-    a { color:#fff; text-decoration:none; margin-left:14px; }
+    header a { color:#fff; text-decoration:none; margin-left:14px; }
     main { padding:24px; display:grid; grid-template-columns: 1fr 380px; gap:24px; }
     .card { background:#1c2541; border-radius:12px; padding:18px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
     .prices { display:grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap:16px; }
@@ -19,6 +20,11 @@
     ul { margin:8px 0 0 18px; }
     .muted { opacity:.85 }
     .small { font-size:12px; }
+
+    /* Responsivo */
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -47,6 +53,7 @@
         </ul>
 
         {% if current_user.is_authenticated %}
+          <!-- DEMO: redireciona para o DASHBOARD -->
           <a class="btn buy-btn" href="/?plan=starter">Assinar Starter</a>
         {% else %}
           <a class="btn" href="{{ url_for('auth.login_page', next='/pricing') }}">Entrar para assinar</a>
@@ -72,6 +79,7 @@
         </ul>
 
         {% if current_user.is_authenticated %}
+          <!-- DEMO: redireciona para o DASHBOARD -->
           <a class="btn buy-btn" href="/?plan=pro">Assinar Pro</a>
         {% else %}
           <a class="btn" href="{{ url_for('auth.login_page', next='/pricing') }}">Entrar para assinar</a>
@@ -121,6 +129,7 @@
 </main>
 
 <script>
+  // UX: estado “Redirecionando…”
   document.querySelectorAll('.buy-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       btn.textContent = 'Redirecionando…';
