@@ -45,10 +45,10 @@
         <a href="/" style="color:#fff;margin-right:12px;text-decoration:none;">Dashboard</a>
         <a href="/vehicles" style="color:#fff;margin-right:12px;text-decoration:none;">Frota</a>
         <a href="/tracking" style="color:#fff;margin-right:12px;text-decoration:none;">Telemetria</a>
-        <a href="/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
+
         <form method="post" action="/logout" style="display:inline;"><button class="btn secondary">Sair</button></form>
       {% else %}
-        <a href="/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
+
         <a href="/login" class="btn">Entrar</a>
       {% endif %}
     </nav>
@@ -56,7 +56,8 @@
   </header>
 
   <main>
-    {% if current_user.is_authenticated and current_user.has_active_subscription() %}
+    {% if True %}
+
       <!-- ✅ Usuário com acesso: mostra os formulários e resultados -->
       <section class="card">
         <h3>Depósito</h3>
@@ -158,17 +159,6 @@
         </table>
       </section>
 
-    {% else %}
-      <!-- 🔒 Sem acesso: mostra CTA para login/planos -->
-      <section class="card">
-        <h3>Acesso restrito</h3>
-        <p>Faça login e ative um plano para utilizar a otimização de rotas.</p>
-        <p>
-          <a class="btn" href="/login">Entrar</a>
-          <a class="btn secondary" href="/pricing">Ver planos</a>
-        </p>
-      </section>
-      {% set hide_forms = True %}
     {% endif %}
   </main>
 
