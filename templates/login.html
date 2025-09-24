@@ -7,9 +7,10 @@
 a{color:#ffd166}</style></head><body>
 <div class="card">
   <h2>Entrar</h2>
-  <form method="post" action="/login">
+  <form method="POST" action="{{ url_for('auth.login_post', next=request.args.get('next', next)) }}">
     <input name="email" placeholder="seu@email.com" required>
     <input name="password" type="password" placeholder="senha" required>
+    <input type="hidden" name="next" value="{{ request.args.get('next') or next or '' }}">
     <button class="btn" type="submit">Entrar</button>
   </form>
   <p>Não tem conta? <a href="/register">Cadastre-se</a></p>

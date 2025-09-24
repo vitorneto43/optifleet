@@ -1,9 +1,24 @@
 <!doctype html>
 <html lang="pt-br">
+
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OptiFleet — Dashboard</title>
+  <link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+  crossorigin=""
+/>
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin=""
+></script>
+  <!-- ✅ carrega seus estilos globais (onde está .kpis, .kpi-card, etc.) -->
+  <link rel="stylesheet" href="/static/css/site.css">
   <style>
     :root{--bg:#0b132b;--card:#1c2541;--ink:#fff;--muted:#a0aec0;--acc:#3a86ff}
     *{box-sizing:border-box}
@@ -45,7 +60,8 @@
         <a href="/" style="color:#fff;margin-right:12px;text-decoration:none;">Dashboard</a>
         <a href="/vehicles" style="color:#fff;margin-right:12px;text-decoration:none;">Frota</a>
         <a href="/tracking" style="color:#fff;margin-right:12px;text-decoration:none;">Telemetria</a>
-
+        <a href="/account" style="color:#fff;margin-right:12px;text-decoration:none;">Minha conta</a>
+<a href="/billing/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
         <form method="post" action="/logout" style="display:inline;"><button class="btn secondary">Sair</button></form>
       {% else %}
 
@@ -54,6 +70,47 @@
     </nav>
 
   </header>
+
+  {% if trial %}
+    <div style="background:#1d4ed8;border-bottom:1px solid rgba(255,255,255,.2);color:#fff;padding:10px 16px;text-align:center">
+      Olá {{ current_user.email }}, seu <b>trial</b> expira em
+      <b>{{ days_left if days_left is not none else '?' }} dia(s)</b>.
+      <a href="/account" style="color:#ffd166;text-decoration:underline;margin-left:10px">Ative seu plano agora</a>
+    </div>
+  {% elif sub and sub[4] == 'active' %}
+    <div style="background:#065f46;border-bottom:1px solid rgba(255,255,255,.2);color:#d1fae5;padding:10px 16px;text-align:center">
+      Assinatura ativa (plano: {{ sub[1] }}, veículos: {{ sub[3] }}). <a href="/account" style="color:#a7f3d0;text-decoration:underline">Gerenciar</a>
+    </div>
+  {% else %}
+    <div style="background:#7c2d12;border-bottom:1px solid rgba(255,255,255,.2);color:#fff;padding:10px 16px;text-align:center">
+      Sem assinatura ativa. <a href="/account" style="color:#ffd166;text-decoration:underline">Iniciar trial / contratar</a>
+    </div>
+  {% endif %}
+
+
+  <section class="kpis">
+    <div class="kpi-card">
+      <span class="kpi-icon">🚚</span>
+      <div class="kpi-value">{{ (kpis.total_veiculos if kpis else 0) }}</div>
+      <div class="kpi-label">Veículos Ativos</div>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-icon">📍</span>
+      <div class="kpi-value">{{ (kpis.viagens_hoje if kpis else 0) }}</div>
+      <div class="kpi-label">Viagens Hoje</div>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-icon">📊</span>
+      <div class="kpi-value">{{ (kpis.viagens_semana if kpis else 0) }}</div>
+      <div class="kpi-label">Viagens na Semana</div>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-icon">⚠️</span>
+      <div class="kpi-value">{{ (kpis.alertas if kpis else 0) }}</div>
+      <div class="kpi-label">Alertas Recentes</div>
+    </div>
+  </section>
+
 
   <main>
     {% if True %}
@@ -123,13 +180,7 @@
               <option value="min_distance">Minimizar distância</option>
             </select>
           </div>
-          <div>
-            <label>Incluir pedágios</label>
-            <select id="tolls">
-              <option value="true" selected>Sim</option>
-              <option value="false">Não</option>
-            </select>
-          </div>
+
         </div>
 
         <div style="display:flex; gap:8px; margin-top:8px;">
@@ -158,13 +209,56 @@
           <tbody></tbody>
         </table>
       </section>
+      <section class="card">
+        <div style="display:flex; gap:8px; margin:8px 0;">
+          <button class="btn secondary" onclick="fetch('/demo/start',{method:'POST'}).then(()=>loadLatestPositions())">Iniciar simulação (3 veículos)</button>
+          <button class="btn secondary" onclick="fetch('/demo/stop',{method:'POST'})">Parar simulação</button>
+        </div>
+  <h3 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <span>Rastreamento ao vivo</span>
+
+      <!-- Controles do histórico dentro do cabeçalho -->
+      <div class="hist-controls">
+        <label class="muted">Histórico</label>
+        <select id="histHours">
+          <option value="3">3h</option>
+          <option value="6" selected>6h</option>
+          <option value="12">12h</option>
+          <option value="24">24h</option>
+        </select>
+        <input id="histVehicle" placeholder="vehicle_id (opcional)">
+        <button class="btn secondary" onclick="drawHistory()">Mostrar</button>
+        <button class="btn secondary" onclick="exportHistory('csv')">Exportar CSV</button>
+        <button class="btn secondary" onclick="exportHistory('pdf')">Exportar PDF</button>
+        <button class="btn secondary" onclick="clearHistory()">Limpar</button>
+      </div>
+    </h3>
+
+    <div id="liveMap" style="height:420px;border-radius:12px;position:relative;"></div>
+
+    <!-- Legenda de eventos -->
+    <div class="map-legend">
+      <span>🟢 Início</span>
+      <span>🔴 Fim</span>
+      <span>⏸️ Parada</span>
+      <span>⚠️ Excesso</span>
+      <span>🔁 Manobra brusca</span>
+    </div>
+
+
+  </section>
+
+
+
+
+
 
     {% endif %}
   </main>
 
 
 <script>
-function q(id){ return document.getElementById(id) }
+function q(id){ return document.getElementById(id); }
 
 function nextVehId(){
   const rows = document.querySelectorAll("#vehTable tbody tr").length;
@@ -175,10 +269,13 @@ function nextStopId(){
   return "S" + (rows + 1);
 }
 
-function addVehicle(v={
-  id: nextVehId(), capacity:1200, start_time:"08:00", end_time:"18:00",
-  km_rodados:20000, dias:60, alertas:0
-}){
+function addVehicle(v){
+  if(!v){
+    v = {
+      id: nextVehId(), capacity:1200, start_time:"08:00", end_time:"18:00",
+      km_rodados:20000, dias:60, alertas:0
+    };
+  }
   const tb = document.querySelector("#vehTable tbody");
   const tr = document.createElement("tr");
   tr.innerHTML = `
@@ -194,34 +291,37 @@ function addVehicle(v={
   tb.appendChild(tr);
 }
 
-function addStop(s={id:"S"+(stopTable.rows.length), vehicle:"", address:"", lat:"", lon:"", demand:100, service_min:10, tw_start:"08:00", tw_end:"18:00"}){
+function addStop(s){
+  if(!s){
+    s = {
+      id: nextStopId(), vehicle:"", address:"", lat:"", lon:"",
+      demand:100, service_min:10, tw_start:"08:00", tw_end:"18:00"
+    };
+  }
   const tb = document.querySelector("#stopTable tbody");
   const tr = document.createElement("tr");
   tr.innerHTML = `
     <td><input value="${s.id}"></td>
     <td><input placeholder="ex.: V1" value="${s.vehicle||""}"></td>
-    <td><input placeholder="Rua..., Cidade - UF" value="${s.address}"></td>
-    <td><input type="number" step="any" value="${s.lat}"></td>
-    <td><input type="number" step="any" value="${s.lon}"></td>
-    <td><input type="number" value="${s.demand}"></td>
-    <td><input type="number" value="${s.service_min}"></td>
-    <td><input value="${s.tw_start}"></td>
-    <td><input value="${s.tw_end}"></td>
+    <td><input placeholder="Rua..., Cidade - UF" value="${s.address||""}"></td>
+    <td><input type="number" step="any" value="${s.lat??""}"></td>
+    <td><input type="number" step="any" value="${s.lon??""}"></td>
+    <td><input type="number" value="${s.demand??0}"></td>
+    <td><input type="number" value="${s.service_min??0}"></td>
+    <td><input value="${s.tw_start||"08:00"}"></td>
+    <td><input value="${s.tw_end||"18:00"}"></td>
     <td><button class="btn secondary" onclick="this.closest('tr').remove()">remover</button></td>
   `;
   tb.appendChild(tr);
 }
 
-
 function loadSample(){
-  // depósito
   q('dep_address').value = "Av. Boa Viagem, Recife - PE";
   q('dep_lat').value = "-8.1735";
   q('dep_lon').value = "-34.9176";
   q('dep_start').value = "08:00";
   q('dep_end').value = "18:00";
 
-  // limpa tabelas
   document.querySelector("#vehTable tbody").innerHTML = "";
   document.querySelector("#stopTable tbody").innerHTML = "";
 
@@ -229,10 +329,10 @@ function loadSample(){
   addVehicle({id:"V2", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:38000, dias:120, alertas:2});
   addVehicle({id:"V3", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:12000, dias:20, alertas:0});
 
-  addStop({id:"S1", address:"Praça do Marco Zero, Recife - PE", lat:"", lon:"", demand:200, service_min:10, tw_start:"09:00", tw_end:"12:00"});
-  addStop({id:"S2", address:"Rua da Aurora, Recife - PE", lat:"", lon:"", demand:300, service_min:10, tw_start:"10:00", tw_end:"16:00"});
-  addStop({id:"S3", address:"Shopping RioMar Recife", lat:"", lon:"", demand:250, service_min:10, tw_start:"08:30", tw_end:"14:00"});
-  addStop({id:"S4", address:"UFPE - Recife", lat:"", lon:"", demand:150, service_min:10, tw_start:"08:00", tw_end:"18:00"});
+  addStop({id:"S1", address:"Praça do Marco Zero, Recife - PE", demand:200, service_min:10, tw_start:"09:00", tw_end:"12:00"});
+  addStop({id:"S2", address:"Rua da Aurora, Recife - PE", demand:300, service_min:10, tw_start:"10:00", tw_end:"16:00"});
+  addStop({id:"S3", address:"Shopping RioMar Recife", demand:250, service_min:10, tw_start:"08:30", tw_end:"14:00"});
+  addStop({id:"S4", address:"UFPE - Recife", demand:150, service_min:10, tw_start:"08:00", tw_end:"18:00"});
 }
 
 function buildPayload(){
@@ -257,7 +357,7 @@ function buildPayload(){
     const t = tr.querySelectorAll("td input");
     return {
       id: t[0].value,
-      vehicle: t[1].value || undefined,  // <- NOVO
+      vehicle: t[1].value || undefined,
       address: t[2].value || undefined,
       lat: t[3].value ? parseFloat(t[3].value) : undefined,
       lon: t[4].value ? parseFloat(t[4].value) : undefined,
@@ -266,7 +366,6 @@ function buildPayload(){
       tw_start: t[7].value, tw_end: t[8].value
     };
   });
-
 
   const telemetry = {};
   vehicles.forEach(v=>{
@@ -277,25 +376,44 @@ function buildPayload(){
   return {
     depot, vehicles, stops,
     objective: q('objective').value,
-    include_tolls: q('tolls').value === "true",
     telemetry
   };
+}
+
+function isValidStop(s){
+  const hasCoords = (typeof s.lat === 'number' && !isNaN(s.lat)) &&
+                    (typeof s.lon === 'number' && !isNaN(s.lon));
+  const hasAddress = !!s.address && s.address.trim().length > 8;
+  return hasCoords || hasAddress;
 }
 
 async function optimize(){
   q('msg').textContent = "";
   const body = buildPayload();
 
-  if(!((body.depot.lat && body.depot.lon) || body.depot.address)){
-    q('msg').textContent = "Informe endereço OU lat/lon do depósito.";
+  if(!((body.depot.lat && body.depot.lon) || (body.depot.address && body.depot.address.trim().length>8))){
+    q('msg').textContent = "Informe endereço completo OU lat/lon do depósito.";
     return;
   }
   if(body.vehicles.length === 0 || body.stops.length === 0){
     q('msg').textContent = "Adicione pelo menos 1 veículo e 1 parada.";
     return;
   }
+  const bad = body.stops.filter(s => !isValidStop(s));
+  if(bad.length){
+    q('msg').textContent = "Há paradas sem endereço completo nem lat/lon. Corrija e tente novamente.";
+    return;
+  }
+  const vehIds = new Set(body.vehicles.map(v=>String(v.id)));
+  const badVeh = body.stops.filter(s => s.vehicle && !vehIds.has(String(s.vehicle)));
+  if(badVeh.length){
+    q('msg').textContent = "Há paradas atribuídas a veículo inexistente. Limpe a coluna Veículo ou use V1, V2...";
+    return;
+  }
+
   const res = await fetch('/optimize', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify(body)
   });
   const data = await res.json();
@@ -304,26 +422,36 @@ async function optimize(){
     return;
   }
 
-  document.getElementById('summary').innerHTML = `
+  const allEmpty = (data.routes || []).every(r =>
+    (r.nodes_abs && r.nodes_abs.length <= 2) || (r.nodes && r.nodes.length <= 2)
+  );
+  if(allEmpty){
+    q('msg').textContent = "Nenhuma parada foi atendida (rotas 0→0). Verifique endereços, veículo, janelas e capacidade.";
+  }
+
+  // resumo + mapa
+  q('summary').innerHTML = `
     <div><b>Status:</b> ${data.status}</div>
     <div><b>Tempo total:</b> ${data.total_time_min} min</div>
     <div><b>Distância total:</b> ${data.total_dist_km} km</div>
-    <div><b>Pedágios:</b> R$ ${data.total_toll_cost}</div>
     <div><b>Mapa:</b> ${data.map_url ? `<a href="${data.map_url}" target="_blank" style="color:#ffd166">abrir em nova aba</a>` : '<span class="muted">não gerado</span>'}</div>
   `;
-  document.getElementById('mapFrame').src = data.map_url || "";
+  q('mapFrame').src = data.map_url ? (data.map_url + '?t=' + Date.now()) : "";
 
+  // rotas
   const tbody = document.querySelector('#routesTable tbody');
   tbody.innerHTML = "";
-  data.routes.forEach(r=>{
+  (data.routes || []).forEach(r=>{
+    const seq = (r.nodes_abs || r.nodes || []).join(' ➜ ');
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${r.vehicle_id}</td><td>${r.nodes.join(' ➜ ')}</td><td>${r.time_min}</td><td>${r.dist_km}</td>`;
+    tr.innerHTML = `<td>${r.vehicle_id}</td><td>${seq}</td><td>${r.time_min}</td><td>${r.dist_km}</td>`;
     tbody.appendChild(tr);
   });
 
+  // manutenção
   const mtbody = document.querySelector('#maintTable tbody');
   mtbody.innerHTML = "";
-  data.maintenance.forEach(m=>{
+  (data.maintenance || []).forEach(m=>{
     const color = (m.failure_risk>=0.7?'#ff6b6b':(m.failure_risk>=0.4?'#ffd166':'#06d6a0'));
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${m.vehicle_id}</td><td style="color:${color}">${m.failure_risk}</td>`;
@@ -331,11 +459,164 @@ async function optimize(){
   });
 }
 
-window.addEventListener('DOMContentLoaded', ()=>{
-  addVehicle();
-  addStop();
+
+  // ===== Live map (Leaflet) =====
+let liveMap, markers = {};
+
+function initLiveMap() {
+  if (liveMap) return;
+  liveMap = L.map('liveMap').setView([-8.05, -34.9], 11);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+  }).addTo(liveMap);
+}
+
+async function loadLatestPositions() {
+  const r = await fetch('/api/telemetry/latest');
+  const data = await r.json();
+  data.forEach(upsertMarker);
+  fitIfNeeded();
+}
+
+function upsertMarker(p) {
+  const id = p.vehicle_id;
+  const ll = [p.lat, p.lon];
+  const html = `<b>${id}</b><br>Vel.: ${Number(p.speed||0).toFixed(0)} km/h<br>Fuel: ${Number(p.fuel||0).toFixed(0)}%<br>${p.ts||""}`;
+
+  if (markers[id]) {
+    markers[id].setLatLng(ll).setPopupContent(html);
+  } else {
+    const m = L.marker(ll);
+    m.bindPopup(html);
+    m.addTo(liveMap);
+    markers[id] = m;
+  }
+}
+
+function fitIfNeeded() {
+  const ids = Object.keys(markers);
+  if (ids.length === 0) return;
+  const group = L.featureGroup(ids.map(k => markers[k]));
+  liveMap.fitBounds(group.getBounds().pad(0.2), {animate: false});
+}
+
+function startSSE() {
+  const es = new EventSource('/api/telemetry/stream');
+  es.onmessage = (e) => {
+    try {
+      const list = JSON.parse(e.data);
+      list.forEach(upsertMarker);
+    } catch (_){}
+  };
+}
+let historyLayer, eventsLayer, startMarker, endMarker;
+
+function clearHistory(){
+  if(historyLayer){ historyLayer.remove(); historyLayer = null; }
+  if(eventsLayer){ eventsLayer.remove(); eventsLayer = null; }
+  if(startMarker){ startMarker.remove(); startMarker = null; }
+  if(endMarker){ endMarker.remove(); endMarker = null; }
+}
+
+function makeIcon(emoji){
+  return L.divIcon({
+    html: `<div style="font-size:18px">${emoji}</div>`,
+    className: "evt-ico",
+    iconSize: [24,24],
+    iconAnchor: [12,12]
+  });
+}
+
+async function drawHistory(){
+  if(!liveMap) initLiveMap();
+  clearHistory();
+
+  const hours = parseInt(document.getElementById('histHours').value || "6", 10);
+  const vid = document.getElementById('histVehicle').value.trim();
+
+  // 1) trilha
+  const hUrl = `/api/telemetry/history?hours=${hours}${vid?`&vehicle_id=${encodeURIComponent(vid)}`:""}`;
+  const r1 = await fetch(hUrl);
+  const pts = await r1.json();
+  if(!Array.isArray(pts) || pts.length < 2){ alert("Sem pontos suficientes no período."); return; }
+
+  // agrupa por veículo, desenha linha por veículo
+  const groupByVehicle = {};
+  pts.forEach(p => {
+    (groupByVehicle[p.vehicle_id] ||= []).push(p);
+  });
+
+  const bounds = [];
+  historyLayer = L.layerGroup().addTo(liveMap);
+
+  Object.entries(groupByVehicle).forEach(([veh, arr])=>{
+    const latlngs = arr.map(p => [p.lat, p.lon]);
+    const poly = L.polyline(latlngs, {weight: 4, opacity: 0.9}).addTo(historyLayer);
+
+    // início/fim (apenas se filtrar 1 veículo)
+    if(Object.keys(groupByVehicle).length === 1){
+      startMarker = L.marker(latlngs[0], {icon: makeIcon("🟢")}).addTo(historyLayer).bindPopup(`<b>${veh}</b><br>Início<br>${arr[0].ts}`);
+      endMarker   = L.marker(latlngs[latlngs.length-1], {icon: makeIcon("🔴")}).addTo(historyLayer).bindPopup(`<b>${veh}</b><br>Fim<br>${arr[arr.length-1].ts}`);
+    }
+
+    latlngs.forEach(ll => bounds.push(ll));
+  });
+
+  if(bounds.length){ liveMap.fitBounds(bounds, {padding:[30,30]}); }
+
+  // 2) eventos
+  const eUrl = `/api/telemetry/events?hours=${hours}${vid?`&vehicle_id=${encodeURIComponent(vid)}`:""}`;
+  const r2 = await fetch(eUrl);
+  const evs = await r2.json();
+  if(!Array.isArray(evs)) return;
+
+  eventsLayer = L.layerGroup().addTo(liveMap);
+  evs.forEach(e=>{
+    let emoji = "📍";
+    if(e.type === "stop") emoji = "⏸️";
+    if(e.type === "overspeed") emoji = "⚠️";
+    if(e.type === "harsh_turn") emoji = "🔁";
+    const m = L.marker([e.lat, e.lon], {icon: makeIcon(emoji)}).addTo(eventsLayer);
+    const extra = e.type === "stop" ? `${e.minutes} min parado`
+               : e.type === "overspeed" ? `${Math.round(e.value)} km/h`
+               : e.type === "harsh_turn" ? `Δ rumo ${e.delta_deg}°`
+               : "";
+    m.bindPopup(`<b>${e.vehicle_id}</b><br>${e.type}<br>${extra}<br>${e.ts}`);
+  });
+}
+
+
+async function refreshKpis(){
+    try{
+      const r = await fetch('/api/kpis');
+      if(!r.ok) return;
+      const d = await r.json();
+      const els = document.querySelectorAll('.kpi-card .kpi-value');
+      if(els[0]) els[0].textContent = d.total_veiculos ?? 0;
+      if(els[1]) els[1].textContent = d.viagens_hoje ?? 0;
+      if(els[2]) els[2].textContent = d.viagens_semana ?? 0;
+      if(els[3]) els[3].textContent = d.alertas ?? 0;
+    }catch(e){}
+  }
+  refreshKpis();
+  setInterval(refreshKpis, 15000);
+
+function exportHistory(fmt){
+  const hours = parseInt(document.getElementById('histHours').value || "6", 10);
+  const vid = document.getElementById('histVehicle').value.trim();
+  const url = `/api/telemetry/export?fmt=${encodeURIComponent(fmt)}&hours=${hours}${vid?`&vehicle_id=${encodeURIComponent(vid)}`:""}`;
+  // abre em nova aba pra baixar
+  window.open(url, '_blank');
+}
+
+
+window.addEventListener('DOMContentLoaded', () => {
+  initLiveMap();
+  loadLatestPositions();
+  startSSE();
 });
 </script>
+
 </body>
 </html>
 

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>OptiFleet — Rotas com IA, Rastreamento e Telemetria</title>
+  <meta name="description" content="Planejamento de rotas com IA + rastreamento em tempo real e telemetria inteligente. Reduza custos, aumente a produtividade e encante seus clientes." />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="/static/css/site.css">
+  <meta property="og:title" content="OptiFleet — Rotas com IA, Rastreamento e Telemetria">
+  <meta property="og:description" content="Planejamento de rotas com IA + rastreamento em tempo real e telemetria inteligente.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="/static/img/og-cover.jpg">
+  <link rel="icon" href="/static/img/favicon.png">
+</head>
+<body>
+  <!-- NAV -->
+  <header class="nav">
+    <div class="nav__wrap">
+      <a href="/site" class="brand">
+        <img src="/static/img/logo (2).png" alt="OptiFleet" class="brand__logo">
+        <span class="brand__name">OptiFleet</span>
+      </a>
+      <nav class="nav__links">
+        <a href="#beneficios">Benefícios</a>
+        <a href="#como-funciona">Como funciona</a>
+        <a href="#precos">Preços</a>
+        <a href="#faq">FAQ</a>
+        <a href="/login" class="btn btn--ghost">Entrar</a>
+        <a href="/register" class="btn">Começar</a>
+      </nav>
+      <button class="nav__burger" id="burger" aria-label="Abrir menu">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </header>
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+  {% if msgs %}
+    <div class="flash-wrap" style="max-width:1100px;margin:16px auto;padding:0 20px">
+      {% for cat, msg in msgs %}
+        <div class="flash flash-{{cat}}" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);padding:10px 12px;border-radius:10px;margin:8px 0">
+          {{ msg }}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endwith %}
+
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="hero__bg"></div>
+    <div class="hero__content">
+      <h1>Rotas com IA + Rastreamento ao vivo<br class="br-md"> e Telemetria inteligente</h1>
+      <p class="hero__subtitle">
+        Planeje, acompanhe e melhore sua operação de ponta a ponta. <br>
+        Menos km, menos custo, mais entregas no horário — e clientes felizes.
+      </p>
+      <div class="hero__cta">
+        <!-- Hero CTAs -->
+        <a href="/login?next=/trial/start" class="btn btn--xl">Teste agora</a>
+        <!-- Página pública de demo (sem login) -->
+        <a href="/demo" class="btn btn--xl btn--ghost">Ver demo</a>
+        <a href="/contact" class="btn btn--xl btn--ghost">Falar com vendas</a>
+
+      </div>
+
+      <div class="hero__badges">
+        <span>⚡ Otimização multi-veículo</span>
+        <span>🛰️ Rastreamento em tempo real</span>
+        <span>🛠️ Telemetria & manutenção preditiva</span>
+      </div>
+      <div class="hero__shot">
+        <img src="/static/img/dashboard-shot.png" alt="Dashboard OptiFleet">
+      </div>
+    </div>
+  </section>
+
+  <!-- SOCIAL PROOF -->
+  <section class="logos">
+    <div class="logos__wrap">
+      <span class="logos__title">Confiado por operações modernas</span>
+      <div class="logos__row">
+        <img src="/static/img/logo-gray-1.svg" alt="">
+        <img src="/static/img/logo-gray-2.svg" alt="">
+        <img src="/static/img/logo-gray-3.svg" alt="">
+        <img src="/static/img/logo-gray-4.svg" alt="">
+        <img src="/static/img/logo-gray-5.svg" alt="">
+      </div>
+    </div>
+  </section>
+
+  <!-- BENEFÍCIOS -->
+  <section id="beneficios" class="features">
+    <div class="section__head">
+      <h2>O que nos diferencia</h2>
+      <p>Combinação única de IA de rotas, rastreamento e telemetria — leve, rápida e sem dor de cabeça.</p>
+    </div>
+    <div class="grid">
+      <div class="feature"><div class="icon">🧠</div><h3>IA de rotas (VRPTW)</h3><p>Respeita janelas de entrega, capacidade, tempo de serviço e múltiplos veículos — com resultados prontos pra rua.</p></div>
+      <div class="feature"><div class="icon">🛰️</div><h3>Rastreamento em tempo real</h3><p>Visualize a frota ao vivo com atualização contínua (SSE) e histórico de posições.</p></div>
+      <div class="feature"><div class="icon">🔧</div><h3>Telemetria inteligente</h3><p>Capta velocidade, combustível, hodômetro, alertas OBD e sugere manutenção preditiva.</p></div>
+      <div class="feature"><div class="icon">💸</div><h3>Custo otimizado</h3><p>Arquitetura enxuta (DuckDB local ou edge) e sem lock-in — você cresce pagando menos.</p></div>
+      <div class="feature"><div class="icon">🧩</div><h3>Integrações simples</h3><p>APIs REST para ingestão (rastreador/servidor próprio). Sem mensalidade surpresa.</p></div>
+      <div class="feature"><div class="icon">🔐</div><h3>Segurança</h3><p>Autenticação de token por dispositivo, isolamento por cliente e trilha de auditoria.</p></div>
+    </div>
+  </section>
+
+  <!-- COMO FUNCIONA -->
+  <section id="como-funciona" class="how">
+    <div class="section__head">
+      <h2>Como funciona</h2>
+      <p>Em minutos do cadastro ao despacho.</p>
+    </div>
+    <div class="steps">
+      <div class="step"><span class="badge">1</span><h4>Cadastre depósito, frota e clientes</h4><p>Importe planilha ou copie & cole. Endereço ou lat/lon: você decide.</p></div>
+      <div class="step"><span class="badge">2</span><h4>Otimize com IA</h4><p>Defina objetivo (custo/tempo/distância), janelas e restrições. Gere rotas com um clique.</p></div>
+      <div class="step"><span class="badge">3</span><h4>Rastreie e ajuste</h4><p>Acompanhe veículos ao vivo, reotimize se precisar e registre ocorrências.</p></div>
+      <div class="step"><span class="badge">4</span><h4>Telemetria & manutenção</h4><p>Receba alertas de risco e evite paradas não planejadas.</p></div>
+    </div>
+
+    <div class="how__split">
+      <div class="how__shot"><img src="/static/img/feature-routes.jpeg" alt="Rotas com IA"></div>
+      <div class="how__text">
+        <h3>Rotas que respeitam a realidade da rua</h3>
+        <p>Modelagem VRPTW com tempos de serviço, capacidades e janelas de entrega. Exporte a sequência e comece a rodar.</p>
+        <ul class="check">
+          <li>Multi-veículo (escala para grandes frotas)</li>
+          <li>Janelas de tempo e prioridades</li>
+          <li>Estimativa de pedágios e custos</li>
+        </ul>
+        <a href="/app" class="link">Ver demo do roteirizador →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- PREÇOS -->
+  <section id="precos" class="pricing">
+    <div class="section__head">
+      <h2>Planos simples e escaláveis</h2>
+      <p>Comece pequeno, cresça sem sustos.</p>
+    </div>
+
+    <div class="pricing__toggle">
+      <span>Mensal</span>
+      <label class="switch">
+        <input type="checkbox" id="toggleAnnual">
+        <span class="slider"></span>
+      </label>
+      <span>Anual <b class="save">-15%</b></span>
+    </div>
+
+    <div class="plans">
+      <!-- START (route) -->
+      <div class="plan">
+        <h3>Start</h3>
+        <div class="price">
+          <span class="p p-m">R$ 399</span>
+          <span class="p p-a">R$ 339,15</span>
+          <small>/mês</small>
+        </div>
+        <p class="muted">Para operações iniciando com otimização e rastreamento.</p>
+        <ul>
+          <li>Até 5 veículos</li>
+          <li>Roteirização com IA</li>
+          <li>Mapa ao vivo (SSE)</li>
+          <li>Suporte por e-mail</li>
+        </ul>
+        <div class="qty">
+          <label for="vRoute" class="muted">Veículos</label>
+          <input id="vRoute" type="number" min="1" max="5" value="5">
+        </div>
+        <a id="btnStart" class="btn btn--full" href="/billing/go?plan=route&billing=monthly&vehicles=5" data-plan="route">Assinar Start</a>
+      </div>
+
+      <!-- PRO (full) -->
+      <div class="plan plan--focus">
+        <div class="pill">Mais popular</div>
+        <h3>Pro</h3>
+        <div class="price">
+          <span class="p p-m">R$ 1499</span>
+          <span class="p p-a">R$ 1274,15</span>
+          <small>/mês</small>
+        </div>
+        <p class="muted">Frotas médias com telemetria e manutenção preditiva.</p>
+        <ul>
+          <li>Até 50 veículos</li>
+          <li>Roteirização avançada (VRPTW)</li>
+          <li>Telemetria completa + OBD</li>
+          <li>Alertas e relatórios</li>
+        </ul>
+        <div class="qty">
+          <label for="vFull" class="muted">Veículos</label>
+          <input id="vFull" type="number" min="6" max="50" value="20">
+        </div>
+        <a id="btnPro" class="btn btn--full" href="/billing/go?plan=full&billing=monthly&vehicles=20" data-plan="full">Assinar Pro</a>
+      </div>
+
+      <!-- ENTERPRISE -->
+      <div class="plan">
+        <h3>Enterprise</h3>
+        <div class="price"><span class="p">Sob consulta</span></div>
+        <p class="muted">Grandes operações: integrações, SLAs e customizações.</p>
+        <ul>
+          <li>Veículos ilimitados</li>
+          <li>Integrações dedicadas</li>
+          <li>Dashboards executivos</li>
+          <li>Suporte prioritário</li>
+        </ul>
+        <a class="btn btn--full btn--ghost" href="/contact">Falar com vendas</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- DEPOIMENTOS -->
+  <section class="testi">
+    <div class="section__head"><h2>Resultados que viram vantagem competitiva</h2></div>
+    <div class="testi__grid">
+      <blockquote><p>“Reduzimos 18% dos quilômetros rodados em 30 dias. A previsibilidade de horários melhorou o NPS dos clientes.”</p><footer>— Juliana M., Operações</footer></blockquote>
+      <blockquote><p>“Integramos nosso servidor de rastreamento em uma tarde. As rotas com IA encaixaram perfeito no nosso fluxo.”</p><footer>— Paulo R., TI</footer></blockquote>
+      <blockquote><p>“A telemetria ajudou a antecipar uma falha crítica. Evitamos parada de caminhão e multa por atraso.”</p><footer>— Carla S., Frota</footer></blockquote>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq" class="faq">
+    <div class="section__head"><h2>Perguntas frequentes</h2></div>
+    <div class="faq__grid">
+      <details open><summary>Preciso contratar mapa de terceiros?</summary><p>Não. Trabalhamos bem com tiles OSM/Leaflet e provedores livres. Integrações com Google/OSRM são opcionais.</p></details>
+      <details><summary>Como funciona o rastreamento?</summary><p>Seu dispositivo envia POS para nosso endpoint seguro com token. O dashboard atualiza em tempo real via SSE.</p></details>
+      <details><summary>E a telemetria/OBD?</summary><p>Ingestão REST simples (velocidade, combustível, odômetro, alertas). Nosso módulo estima risco e agenda manutenção.</p></details>
+      <details><summary>É possível rodar on-premise?</summary><p>Sim. DuckDB/edge reduz custo e latência. Também suportamos nuvem e arquiteturas híbridas.</p></details>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <div class="footer__wrap">
+      <div class="col">
+        <div class="brand brand--footer">
+          <img src="/static/img/logo (2).png" alt="OptiFleet" class="brand__logo">
+          <span class="brand__name">OptiFleet</span>
+        </div>
+        <p class="muted">Rotas com IA, rastreamento ao vivo e telemetria inteligente para operações enxutas e eficientes.</p>
+      </div>
+      <div class="col">
+        <h5>Produto</h5>
+        <a href="#beneficios">Benefícios</a>
+        <a href="#como-funciona">Como funciona</a>
+        <a href="#precos">Preços</a>
+      </div>
+      <div class="col">
+        <h5>Empresa</h5>
+        <a href="/contact">Contato</a>
+        <a href="/terms">Termos</a>
+        <a href="/privacy">Privacidade</a>
+      </div>
+    </div>
+    <div class="footer__copy">© <span id="y"></span> OptiFleet. Todos os direitos reservados.</div>
+  </footer>
+
+  <script>
+    // mobile nav
+    const burger = document.getElementById('burger');
+    const links = document.querySelector('.nav__links');
+    burger?.addEventListener('click', ()=> links.classList.toggle('is-open'));
+
+    // pricing toggle + montar links de assinatura (SEM duplicação)
+    const toggle = document.getElementById('toggleAnnual');
+    const pricesM = document.querySelectorAll('.p-m');
+    const pricesA = document.querySelectorAll('.p-a');
+    const btnStart = document.getElementById('btnStart');
+    const btnPro   = document.getElementById('btnPro');
+    const vRoute   = document.getElementById('vRoute');
+    const vFull    = document.getElementById('vFull');
+
+    function currentBilling(){ return toggle?.checked ? 'annual' : 'monthly'; }
+    function setPriceMode(annual){
+      pricesM.forEach(el=> el.style.display = annual ? 'none':'inline');
+      pricesA.forEach(el=> el.style.display = annual ? 'inline':'none');
+      updateLinks();
+    }
+    function makeHref(plan, vehicles){
+      const billing = currentBilling();
+      const v = Math.max(1, parseInt(vehicles||'1',10));
+      return `/billing/go?plan=${encodeURIComponent(plan)}&billing=${encodeURIComponent(billing)}&vehicles=${v}`;
+    }
+    function updateLinks(){
+      if (btnStart) btnStart.href = makeHref('route', vRoute?.value || 5);
+      if (btnPro)   btnPro.href   = makeHref('full',  vFull?.value  || 20);
+    }
+
+    setPriceMode(false);                       // inicia como Mensal
+    toggle?.addEventListener('change', e=> setPriceMode(e.target.checked));
+    vRoute?.addEventListener('input', updateLinks);
+    vFull?.addEventListener('input', updateLinks);
+
+    // year no rodapé
+    document.getElementById('y').textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>

@@ -1,74 +1,107 @@
 <!doctype html>
 <html lang="pt-br">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OptiFleet — Demonstração</title>
-  <style>
-    :root { --bg:#0b132b; --card:#1c2541; --txt:#fff; --btn:#3a86ff; --muted:rgba(255,255,255,.85); }
-    * { box-sizing:border-box }
-    body { font-family: system-ui, Arial; margin:0; background:var(--bg); color:var(--txt); }
-    header { padding:16px 24px; background:var(--card); display:flex; align-items:center; justify-content:space-between; }
-    nav a { color:var(--txt); text-decoration:none; margin-left:14px; }
-    main { padding:24px; display:grid; grid-template-columns: 1fr 380px; gap:24px; }
-    .card { background:var(--card); border-radius:12px; padding:18px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
-    .btn { background:var(--btn); color:#fff; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; display:inline-block; text-decoration:none; }
-    .btn.secondary { background:#6c757d; }
-    .muted { color:var(--muted); }
-    ul { margin:8px 0 0 18px; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Planos — OptiFleet</title>
+<link rel="stylesheet" href="/static/css/site.css">
+<style>
+  body{background:#0b132b;color:#fff;font-family:system-ui,Arial}
+  .wrap{max-width:980px;margin:24px auto;padding:0 16px}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+  .card{background:#1c2541;border-radius:14px;padding:18px;box-shadow:0 10px 28px rgba(0,0,0,.28)}
+  .card h3{margin:0 0 4px}
+  .muted{color:#a0aec0}
+  .price{font-size:28px;font-weight:700;margin:4px 0}
+  .row{display:flex;gap:10px;align-items:center;margin-top:12px}
+  .btn{padding:10px 14px;border-radius:10px;border:0;background:#3a86ff;color:#fff;cursor:pointer;text-decoration:none;display:inline-block}
+  .switch{display:flex;gap:8px;align-items:center;margin:16px 0}
+  input[type=number], select{padding:8px;border-radius:10px;border:0}
+  .badge{background:rgba(255,255,255,.1);padding:4px 8px;border-radius:999px;font-size:12px}
+</style>
 </head>
 <body>
-<header>
-  <div><b>OptiFleet</b></div>
-  <nav>
-    <a href="{{ url_for('home') }}">Dashboard</a>
-    <a href="{{ url_for('pricing') }}">Demonstração</a>
-  </nav>
-</header>
+<div class="wrap">
+  <h1>Planos</h1>
+  <p class="muted">Mensal fixo (R$ 399 e R$ 1499). Anual com <b>{{ (annual_discount*100)|round(0)|int }}% OFF</b> no total.</p>
 
-<main>
-  <section class="card">
-    <h2>Demonstração da plataforma</h2>
-    <p class="muted">
-      Nesta fase, a assinatura está desativada. Você pode acessar o dashboard para testar recursos
-      (cadastro de veículos, paradas, otimização de rotas, mapa e relatórios) sem cobrança.
-    </p>
+  <div class="grid">
+    <!-- START -->
+    <div class="card">
+      <h3>{{ plans['start']['name'] }} <span class="badge">até {{ plans['start']['max_vehicles'] }} veículos</span></h3>
+      <div class="price">{{ fmt(plans['start']['monthly']) }} <span class="muted">/mês</span></div>
+      <div class="muted">Anual: {{ fmt(plans['start']['annual']) }} <span class="muted">(total/ano)</span></div>
 
-    <div style="display:flex; gap:10px; margin-top:12px;">
-      <a class="btn" href="{{ url_for('home') }}">Ir para o Dashboard</a>
-      <a class="btn secondary" target="_blank"
-         href="https://wa.me/5581992512747?text=Olá! Quero saber mais sobre o sistema de logística.">
-        Falar com vendas
-      </a>
+      <div class="switch">
+        <label for="v-start">Veículos</label>
+        <input id="v-start" type="number" min="1" max="{{ plans['start']['max_vehicles'] }}" value="5" style="width:90px">
+        <select id="b-start">
+          <option value="monthly" selected>Mensal</option>
+          <option value="annual">Anual (-{{ (annual_discount*100)|round(0)|int }}%)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <a class="btn"
+           href="{{ url_for('billing.go_checkout', plan='start', billing='monthly', vehicles=5) }}">
+           Contratar
+        </a>
+        <a class="btn"
+           href="{{ url_for('billing.go_checkout', plan='start', billing='annual', vehicles=5) }}">
+          Contratar Start Anual
+        </a>
+
+        <span class="muted">Pagamento no Asaas</span>
+      </div>
+
     </div>
 
-    <div class="card" style="margin-top:16px;">
-      <h3>Como funciona a demo?</h3>
-      <ul>
-        <li>Sem pagamentos e sem planos — apenas exploração guiada.</li>
-        <li>Rotas com janelas de tempo e múltiplos veículos.</li>
-        <li>Mapa interativo e exportações (quando disponíveis).</li>
-      </ul>
-    </div>
-  </section>
+    <!-- PRO -->
+    <div class="card">
+      <h3>{{ plans['pro']['name'] }} <span class="badge">até {{ plans['pro']['max_vehicles'] }} veículos</span></h3>
+      <div class="price">{{ fmt(plans['pro']['monthly']) }} <span class="muted">/mês</span></div>
+      <div class="muted">Anual: {{ fmt(plans['pro']['annual']) }} <span class="muted">(total/ano)</span></div>
 
-  <aside class="card">
-    <h3>Benefícios</h3>
-    <ul>
-      <li>Até 25% menos km rodados</li>
-      <li>Telemetria e manutenção preventiva</li>
-      <li>Custos, pedágios e CO₂ estimados</li>
-      <li>Integrações e suporte humano</li>
-    </ul>
+      <div class="switch">
+        <label for="v-pro">Veículos</label>
+        <input id="v-pro" type="number" min="1" max="{{ plans['pro']['max_vehicles'] }}" value="5" style="width:90px">
+        <select id="b-pro">
+          <option value="monthly" selected>Mensal</option>
+          <option value="annual">Anual (-{{ (annual_discount*100)|round(0)|int }}%)</option>
+        </select>
+      </div>
 
-    <div style="margin-top:12px;">
-      <a class="btn secondary" target="_blank"
-         href="https://wa.me/5581992512747?text=Olá! Quero saber mais sobre o sistema de logística.">
-        Tirar dúvidas no WhatsApp
-      </a>
+      <div class="row">
+          <a class="btn"
+             href="{{ url_for('billing.go_checkout', plan='pro', billing='monthly', vehicles=5) }}">
+             Contratar
+          </a>
+          <a class="btn"
+             href="{{ url_for('billing.go_checkout', plan='pro', billing='annual', vehicles=5) }}">
+             Contratar Pro Anual
+          </a>
+
+          <span class="muted">Pagamento no Asaas</span>
+      </div>
+
     </div>
-  </aside>
-</main>
+  </div>
+
+  <div style="margin-top:16px">
+    <a href="{{ url_for('home') }}" class="btn" style="background:transparent;border:1px solid rgba(255,255,255,.25)">← Voltar</a>
+  </div>
+</div>
+
+<script>
+function go(plan){
+  const v = document.getElementById(`v-${plan}`).value || 5;
+  const b = document.getElementById(`b-${plan}`).value || 'monthly';
+  const url = new URL('{{ url_for("billing.go_checkout") }}', window.location.origin);
+  url.searchParams.set('plan', plan);
+  url.searchParams.set('billing', b);
+  url.searchParams.set('vehicles', v);
+  window.location.href = url.toString();
+}
+</script>
 </body>
 </html>

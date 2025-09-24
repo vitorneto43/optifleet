@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Checkout — OptiFleet</title>
+  <link rel="stylesheet" href="/static/css/site.css">
+  <style>
+    body{background:#0b132b;color:#fff;font-family:system-ui,Arial}
+    .wrap{max-width:820px;margin:24px auto;padding:0 16px}
+    .card{background:#1c2541;border-radius:12px;padding:16px;box-shadow:0 8px 24px rgba(0,0,0,.25);margin-bottom:16px}
+    input,select,button{padding:10px;border-radius:10px;border:0}
+    button{background:#3a86ff;color:#fff;cursor:pointer}
+    .muted{color:#a0aec0}
+    .grid{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+    .btn-link{color:#9cc1ff;text-decoration:none}
+    .btn-link:hover{text-decoration:underline}
+    .btn--ghost{background:transparent;border:1px solid rgba(255,255,255,.25);color:#fff}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Checkout</h1>
+
+  <div class="card">
+    <h3>Resumo</h3>
+
+    {# nomes bonitos dos planos #}
+    {% set plan_names = {'start':'Start','pro':'Pro','enterprise':'Enterprise'} %}
+    <p><b>Plano:</b> {{ plan_label }}</p>
+
+
+
+    {# rótulo de cobrança com aliases #}
+    {% set annual_aliases = ['annual','anual','yearly'] %}
+    <p><b>Cobrança:</b> {{ 'Anual (15% OFF)' if billing in annual_aliases else 'Mensal' }}</p>
+
+    <p><b>Veículos:</b> {{ vehicles }}</p>
+
+    {# valor + equivalente mensal quando anual #}
+    <p><b>Valor:</b> R$ {{ '%.2f'|format(price) }}
+      {% if billing in annual_aliases %}
+        <span class="muted">(equiv. R$ {{ '%.2f'|format(price/12) }}/mês)</span>
+      {% endif %}
+    </p>
+
+    <p class="muted">O pagamento será processado pelo Asaas em ambiente seguro.</p>
+  </div>
+
+  <div class="card">
+    <h3>Dados do pagador</h3>
+    <form method="post" action="/asaas/start">
+      <input type="hidden" name="plan" value="{{ plan }}">
+      <input type="hidden" name="billing" value="{{ billing }}">
+      <input type="hidden" name="vehicles" value="{{ vehicles }}">
+
+      <div class="grid">
+        <div>
+          <label>Nome/Razão Social</label>
+          <input type="text" name="name" placeholder="Nome" required>
+        </div>
+        <div>
+          <label>Email</label>
+          <input type="email" name="email" placeholder="email@exemplo.com" required>
+        </div>
+        <div>
+          <label>CPF/CNPJ</label>
+          <input type="text" name="cpfCnpj" placeholder="CPF/CNPJ">
+        </div>
+        <div>
+          <label>Telefone</label>
+          <input type="text" name="phone" placeholder="Opcional">
+        </div>
+      </div>
+
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button>Prosseguir para pagamento (Asaas)</button>
+        <a class="btn btn--ghost" href="/account/">Cancelar</a>
+      </div>
+    </form>
+  </div>
+
+  <!-- Link corrigido para a página de planos -->
+  <div>
+    <a href="{{ url_for('billing.pricing_page') }}" class="btn-link">← Voltar e ver preços</a>
+  </div>
+</div>
+</body>
+</html>
+
