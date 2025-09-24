@@ -1,73 +1,107 @@
-import time
-import googlemaps
-from typing import Dict, Tuple, List, Optional
-from config import GOOGLE_MAPS_API_KEY, GOOGLE_MAPS_LANGUAGE, GOOGLE_MAPS_REGION, FALLBACK_AVG_KMH
-from core.utils.geo import haversine_km
+import os
+import requests
 
 class RoutingProvider:
     def __init__(self):
-        if not GOOGLE_MAPS_API_KEY:
-            raise RuntimeError("Configure GOOGLE_MAPS_API_KEY no .env")
-        self.gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
+        self._maps_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 
-    # ---------- NOVO: geocodificação ----------
-    def geocode(self, address: str) -> Optional[tuple]:
-        if not address:
+    def geocode(self, address: str):
+        """
+        Geocodifica um endereço usando a API do Google Maps.
+        Retorna (lat, lon) ou None se falhar.
+        """
+        if not self._maps_key:
+            print("[GEOCODE] Falhou: GOOGLE_MAPS_API_KEY não configurada.")
             return None
-        res = self.gmaps.geocode(address, language=GOOGLE_MAPS_LANGUAGE, region=GOOGLE_MAPS_REGION)
-        if not res:
+        try:
+            url = "https://maps.googleapis.com/maps/api/geocode/json"
+            params = {"address": address, "key": self._maps_key}
+            r = requests.get(url, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("status") == "OK" and data["results"]:
+                loc = data["results"][0]["geometry"]["location"]
+                return (loc["lat"], loc["lng"])
+            else:
+                print("[GEOCODE] Falha:", data.get("status"), data.get("error_message"))
+                return None
+        except Exception as e:
+            print("[GEOCODE] Exception:", e)
             return None
-        loc = res[0]["geometry"]["location"]
-        return (loc["lat"], loc["lng"])
-    # ------------------------------------------
 
-    def travel_matrix(self, points: List) -> Dict[Tuple[int,int], Dict]:
-        origins = [(getattr(p, 'loc', p).lat, getattr(p, 'loc', p).lon) for p in points]
-        destinations = origins
-        now = int(time.time())
-        matrix = self.gmaps.distance_matrix(
-            origins=origins, destinations=destinations,
-            mode="driving", language=GOOGLE_MAPS_LANGUAGE, region=GOOGLE_MAPS_REGION,
-            departure_time=now
-        )
-        out = {}
-        for i, row in enumerate(matrix["rows"]):
-            for j, cell in enumerate(row["elements"]):
-                if cell.get("status") != "OK":
-                    km = haversine_km(origins[i], destinations[j])
-                    minutes = (km / max(FALLBACK_AVG_KMH, 1e-6)) * 60.0
+    def travel_matrix(self, points):
+        """
+        Recebe uma lista de objetos com .loc.lat e .loc.lon
+        e retorna um dicionário {(i,j): {"minutes": x, "km": y}}.
+        """
+        coords = [(p.loc.lat, p.loc.lon) for p in points]
+        n = len(coords)
+        result = {}
+
+        if self._maps_key:
+            try:
+                origins = "|".join(f"{lat},{lon}" for lat, lon in coords)
+                destinations = origins
+                url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+                params = {
+                    "origins": origins,
+                    "destinations": destinations,
+                    "key": self._maps_key,
+                    "language": "pt-BR",
+                    "region": "br",
+                }
+                r = requests.get(url, params=params, timeout=20)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("status") == "OK":
+                    rows = data["rows"]
+                    for i in range(n):
+                        for j in range(n):
+                            elem = rows[i]["elements"][j]
+                            if elem.get("status") == "OK":
+                                dist_m = elem["distance"]["value"] / 1000.0
+                                dur_min = elem["duration"]["value"] / 60.0
+                            else:
+                                dist_m, dur_min = 9999.0, 9999.0
+                            result[(i, j)] = {"km": dist_m, "minutes": dur_min}
+                    return result
                 else:
-                    dur = cell.get("duration_in_traffic") or cell.get("duration")
-                    minutes = dur["value"]/60.0
-                    km = cell["distance"]["value"]/1000.0
-                out[(i,j)] = {"minutes": minutes, "km": km}
-        return out
+                    print("[MATRIX][GOOGLE] Falha:", data.get("status"), data.get("error_message"))
+            except Exception as e:
+                print("[MATRIX][GOOGLE] Exception:", e)
 
-    def leg_polyline(self, origin, destination):
-        directions = self.gmaps.directions(
-            origin=(origin.lat, origin.lon),
-            destination=(destination.lat, destination.lon),
-            mode="driving", language=GOOGLE_MAPS_LANGUAGE, region=GOOGLE_MAPS_REGION,
-            departure_time="now", traffic_model="best_guess"
-        )
-        if not directions:
-            return []
-        overview = directions[0].get("overview_polyline", {}).get("points")
-        if not overview:
-            return []
-        return googlemaps.convert.decode_polyline(overview)
+        # fallback fake se não tiver key ou der erro
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    result[(i, j)] = {"km": 0.0, "minutes": 0.0}
+                else:
+                    result[(i, j)] = {"km": 5.0, "minutes": 10.0}
+        return result
 
-    def route_cost_with_tolls(self, origin, destination) -> float:
-        directions = self.gmaps.directions(
-            origin=(origin.lat, origin.lon),
-            destination=(destination.lat, destination.lon),
-            mode="driving", language=GOOGLE_MAPS_LANGUAGE, region=GOOGLE_MAPS_REGION,
-            departure_time="now", traffic_model="best_guess"
-        )
-        if directions and "fare" in directions[0]:
-            val = directions[0]["fare"].get("value")
-            if isinstance(val, (int, float)):
-                return float(val)
-        return 0.0
+    def leg_polyline(self, origin, dest):
+        """
+        Retorna uma polyline codificada entre dois pontos usando Directions API.
+        """
+        if not self._maps_key:
+            return None
+        try:
+            url = "https://maps.googleapis.com/maps/api/directions/json"
+            params = {
+                "origin": f"{origin.lat},{origin.lon}",
+                "destination": f"{dest.lat},{dest.lon}",
+                "key": self._maps_key,
+            }
+            r = requests.get(url, params=params, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("status") == "OK":
+                return data["routes"][0]["overview_polyline"]["points"]
+            else:
+                print("[DIRECTIONS] Falha:", data.get("status"), data.get("error_message"))
+                return None
+        except Exception as e:
+            print("[DIRECTIONS] Exception:", e)
+            return None
 
 
