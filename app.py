@@ -238,7 +238,10 @@ except Exception:
 # HOME pública na raiz
 @app.get("/", endpoint="home")
 def home_public():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
     return render_template("landing.html")
+
 
 # Alias opcional (pode manter /site apontando pra mesma landing)
 @app.get("/site")
