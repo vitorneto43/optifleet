@@ -236,7 +236,7 @@ except Exception:
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # HOME pública na raiz
-@app.get("/")
+@app.get("/", endpoint="home")
 def home_public():
     return render_template("landing.html")
 
@@ -268,6 +268,7 @@ def dashboard():
 
     # sem sub/trial → volta para a landing pública
     return redirect(url_for("home_public"))
+
 
 
 @app.get("/pricing")
