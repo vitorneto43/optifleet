@@ -1,0 +1,264 @@
+<!-- templates/vehicles.html -->
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Frota — OptiFleet</title>
+  <link rel="stylesheet" href="/static/css/site.css">
+  <style>
+    .wrap{max-width:1100px;margin:18px auto;padding:0 16px}
+    .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+    .toolbar input, .toolbar select{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left;font-size:14px}
+    .badge{padding:4px 8px;border-radius:999px;font-size:12px}
+    .b-online{background:#0f5132;color:#d1ffd1}
+    .b-offline{background:#2c3036;color:#d1d5db}
+    .b-maint{background:#5a3d00;color:#ffe8b0}
+    .right{display:flex;gap:6px;justify-content:flex-end}
+    .btn{background:var(--acc);border:0;color:#fff;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .btn.ghost{background:transparent;border:1px solid rgba(255,255,255,.3)}
+    .btn.red{background:#ef4444}
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;padding:16px}
+    .modal>div{background:#111827;border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;max-width:560px;width:100%}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .grid label{font-size:12px;color:var(--muted)}
+    .grid input, .grid textarea{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff;width:100%}
+    .muted{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <header class="nav">
+    <div class="nav__wrap">
+      <a href="/site" class="brand">
+        <img src="/static/img/logo (2).png" class="brand__logo" alt="logo">
+        <span class="brand__name">OptiFleet</span>
+      </a>
+      <nav class="nav__links">
+        <a href="/">Dashboard</a>
+        <a href="/vehicles">Frota</a>
+        <a href="/tracking">Telemetria</a>
+        <form method="post" action="/logout" style="display:inline"><button class="btn btn--ghost">Sair</button></form>
+      </nav>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="toolbar">
+      <input id="q" placeholder="Buscar por id, nome, placa, driver ou tag" oninput="load()">
+      <select id="status" onchange="load()">
+        <option value="">Status (todos)</option>
+        <option value="online">Online</option>
+        <option value="offline">Offline</option>
+        <option value="maintenance">Em manutenção</option>
+      </select>
+      <button class="btn" onclick="openModal()">+ Novo veículo</button>
+      <button class="btn ghost" onclick="openImport()">Importar (JSON/CSV simples)</button>
+      <span class="muted" id="info"></span>
+    </div>
+
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>ID</th><th>Nome</th><th>Placa</th><th>Motorista</th><th>Cap.</th><th>Status</th>
+          <th>Última posição</th><th>Próx. serv. (km)</th><th>IMEI</th><th>Tags</th><th></th>
+
+
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <!-- Modal form -->
+  <div class="modal" id="modal">
+    <div>
+      <h3 id="mTitle">Veículo</h3>
+      <div class="grid">
+        <div><label>ID</label><input id="m_id"></div>
+        <div><label>Nome</label><input id="m_name"></div>
+        <div><label>Placa</label><input id="m_plate"></div>
+        <div><label>Motorista</label><input id="m_driver"></div>
+        <div><label>Capacidade</label><input id="m_capacity" type="number"></div>
+        <div><label for="m_imei">IMEI do rastreador</label><input id="m_imei" placeholder="15 dígitos" maxlength="15" pattern="\d{15}"></div>
+        <div><label for="m_vendor">Fabricante (opcional)</label><input id="m_vendor" placeholder="Ex.: TK-Star, Concox"></div>
+
+
+        <div>
+          <label>Status</label>
+          <select id="m_status">
+            <option value="online">online</option>
+            <option value="offline">offline</option>
+            <option value="maintenance">maintenance</option>
+          </select>
+        </div>
+        <div><label>OBD ID</label><input id="m_obd"></div>
+        <div><label>Tags (CSV)</label><input id="m_tags" placeholder="frio,3/4,eixo2"></div>
+        <div><label>Próx. serviço (km)</label><input id="m_nextkm" type="number" value="0"></div>
+        <div><label>Últ. serviço (km)</label><input id="m_lastkm" type="number" value="0"></div>
+        <div><label>Obs</label><textarea id="m_notes" rows="2"></textarea></div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button class="btn ghost" onclick="closeModal()">Cancelar</button>
+        <button class="btn" onclick="save()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal import -->
+  <div class="modal" id="import">
+    <div>
+      <h3>Importar veículos</h3>
+      <p class="muted">Cole JSON (lista de objetos) ou CSV com cabeçalhos: <code>id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor</code></p>
+      <textarea id="imp_text" rows="10" style="width:100%;padding:8px;border-radius:8px;background:#0b132b;color:#fff;border:1px solid rgba(255,255,255,.15)"></textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button class="btn ghost" onclick="closeImport()">Cancelar</button>
+        <button class="btn" onclick="doImport()">Importar</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const TBL = document.querySelector('#tbl tbody');
+const info = document.getElementById('info');
+
+async function load(){
+  const q = document.getElementById('q').value.trim();
+  const st = document.getElementById('status').value;
+  const qs = new URLSearchParams();
+  if(q) qs.set('q', q);
+  if(st) qs.set('status', st);
+  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`);
+  const data = await r.json();
+  TBL.innerHTML = "";
+  data.forEach(v => {
+    const tr = document.createElement('tr');
+    const badge = v.status === 'online' ? 'b-online' : (v.status==='maintenance'?'b-maint':'b-offline');
+    const lastp = (v.last_lat && v.last_lon) ? `${v.last_lat.toFixed(5)}, ${v.last_lon.toFixed(5)}${v.last_ts?`<br><span class="muted">${v.last_ts}</span>`:''}` : '<span class="muted">—</span>';
+    tr.innerHTML = `
+      <td>${v.id}</td>
+      <td>${v.name||''}</td>
+      <td>${v.plate||''}</td>
+      <td>${v.driver||''}</td>
+      <td>${v.capacity??''}</td>
+      <td><span class="badge ${badge}">${v.status||'offline'}</span></td>
+      <td>${lastp}</td>
+      <td>${v.next_service_km ?? 0}</td>
+      <td>${v.imei || ''}</td>              <!-- 👈 ADICIONE ESTA LINHA -->
+      <td>${v.tags||''}</td>
+      <td class="right">
+        <button class="btn ghost" onclick='edit(${JSON.stringify(v)})'>Editar</button>
+        <button class="btn red" onclick='delVeh("${v.id}")'>Excluir</button>
+      </td>
+    `;
+
+    TBL.appendChild(tr);
+  });
+  info.textContent = `${data.length} veículo(s)`;
+}
+
+function openModal(){
+  document.getElementById('modal').style.display='flex';
+  resetForm();
+  m_id.disabled = false;     // 👈 garante que pode digitar ID no “novo”
+}
+
+function closeModal(){ document.getElementById('modal').style.display='none'; }
+function resetForm(){
+  m_id.value=""; m_name.value=""; m_plate.value=""; m_driver.value="";
+  m_capacity.value=""; m_status.value="offline"; m_obd.value="";
+  m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
+  m_imei.value=""; m_vendor.value="";
+
+}
+function edit(v){
+  document.getElementById('modal').style.display='flex';
+  m_id.value=v.id; m_id.disabled=true;
+  m_name.value=v.name||""; m_plate.value=v.plate||""; m_driver.value=v.driver||"";
+  m_capacity.value=v.capacity??""; m_status.value=v.status||"offline"; m_obd.value=v.obd_id||"";
+  m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
+  m_imei.value = v.imei || "";
+  m_vendor.value = v.vendor || "";
+
+}
+async function save(){
+  const body = {
+    id: m_id.value.trim(), name: m_name.value.trim(), plate: m_plate.value.trim(),
+    driver: m_driver.value.trim(), capacity: parseInt(m_capacity.value||"0"),
+    status: m_status.value, obd_id: m_obd.value.trim(), tags: m_tags.value.trim(),
+    next_service_km: parseFloat(m_nextkm.value||"0"), last_service_km: parseFloat(m_lastkm.value||"0"),
+    notes: m_notes.value.trim(),
+    imei: m_imei.value.trim(),            // 👈 novo
+    vendor: m_vendor.value.trim()         // 👈 novo
+  };
+
+  if (body.imei && !/^\d{15}$/.test(body.imei)) {
+    alert("IMEI deve ter 15 dígitos numéricos.");
+    return;
+  }
+
+
+  if(!body.id){ alert("Informe o ID do veículo."); return; }
+  const method = m_id.disabled ? 'PUT' : 'POST';
+  const url = m_id.disabled ? `/api/fleet/vehicles/${encodeURIComponent(body.id)}` : '/api/fleet/vehicles';
+  const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if(!r.ok){ alert("Erro ao salvar."); return; }
+  closeModal(); load();
+}
+async function delVeh(id){
+  if(!confirm(`Excluir veículo ${id}?`)) return;
+  const r = await fetch(`/api/fleet/vehicles/${encodeURIComponent(id)}`, {method:'DELETE'});
+  if(!r.ok){ alert("Erro ao excluir."); return; }
+  load();
+}
+
+function openImport(){ document.getElementById('import').style.display='flex'; }
+function closeImport(){ document.getElementById('import').style.display='none'; }
+async function doImport(){
+  let txt = document.getElementById('imp_text').value.trim();
+  if(!txt){ closeImport(); return; }
+
+  let rows = [];
+  try{
+    if(txt.startsWith('[')){ // JSON
+      rows = JSON.parse(txt);
+    }else{ // CSV simples
+      rows = csvParse(txt);
+    }
+  }catch(e){
+    alert("Formato inválido."); return;
+  }
+  const r = await fetch('/api/fleet/vehicles/import', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({rows})
+  });
+  const data = await r.json();
+  if(!r.ok){ alert(data.error||"Erro ao importar."); return; }
+  closeImport(); load();
+}
+
+function csvParse(s){
+  const lines = s.split(/\r?\n/).filter(Boolean);
+  const header = lines.shift().split(',').map(x=>x.trim().toLowerCase());
+  return lines.map(line=>{
+    const cols = line.split(',');
+    const o = {};
+    header.forEach((h,i)=> o[h] = (cols[i]??'').trim());
+    // numéricos
+    ['capacity','next_service_km','last_service_km'].forEach(k=>{
+      if(o[k]!==undefined && o[k]!=='') o[k] = Number(o[k]);
+    });
+    // validação leve de imei (se existir)
+    if (o.imei && !/^\d{15}$/.test(o.imei)) {
+      o.imei = ''; // ignora inválido
+    }
+    return o;
+  });
+}
+
+
+window.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

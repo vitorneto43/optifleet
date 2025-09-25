@@ -27,7 +27,9 @@ from flask_login import (
 )
 
 # ===== DB / Users =====
-from core.db import get_user_by_id, get_conn, obter_posicoes, get_active_subscription
+from core.db import get_user_by_id, obter_posicoes, get_active_subscription
+import duckdb  # <— novo
+
 
 # ===== Core (rotas, solver, mapa, manutenção) =====
 from core.models import Location, TimeWindow, Depot, Vehicle, Stop, OptimizeRequest, hhmm_to_minutes
@@ -53,7 +55,7 @@ from routes.trial_routes import bp_trial
 from routes.contact_routes import bp_contact
 from routes.checkout_routes import bp_checkout
 from routes.demo_routes import bp_demo
-from core.db import get_active_subscription, get_active_trial
+
 from datetime import datetime, timezone
 from routes.account_routes import bp_account
 # Disponibiliza user/sub/trial globalmente nos templates (Jinja)
@@ -134,6 +136,8 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,
 )
 
+DB_PATH = os.environ.get("DUCKDB_PATH", "data/opti.duckdb")
+
 AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"  # ativa trial automática em dev
 DEFAULT_TRIAL_PLAN = os.getenv("DEFAULT_TRIAL_PLAN", "full")
 DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
@@ -146,6 +150,38 @@ DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "14"))
 login_manager = LoginManager()
 login_manager.login_view = "auth.login_page"
 login_manager.init_app(app)
+
+def get_conn():
+    # conexão por arquivo; cria a pasta se necessário
+    Path(os.path.dirname(DB_PATH)).mkdir(parents=True, exist_ok=True)
+    return duckdb.connect(DB_PATH)
+
+def _init_db():
+    """Cria tabela trackers se não existir (idempotente)."""
+    with get_conn() as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS trackers (
+              id         INTEGER PRIMARY KEY,
+              vehicle_id INTEGER NULL,
+              imei       TEXT NOT NULL UNIQUE,
+              vendor     TEXT,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+def insert_tracker(imei: str, vendor: str | None = None, vehicle_id: int | None = None):
+    with get_conn() as con:
+        con.execute(
+            "INSERT INTO trackers (imei, vendor, vehicle_id) VALUES (?, ?, ?)",
+            [imei, vendor, vehicle_id]
+        )
+
+def get_tracker_by_imei(imei: str):
+    with get_conn() as con:
+        return con.execute("SELECT * FROM trackers WHERE imei = ?", [imei]).fetchone()
+
+# chama o bootstrap de schema na inicialização do app
+_init_db()
 
 @login_manager.user_loader
 def load_user(user_id: str):
