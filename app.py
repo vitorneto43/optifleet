@@ -234,37 +234,41 @@ except Exception:
 # -----------------------------------------------------------------------------
 # Rotas simples / páginas
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# HOME pública na raiz
 @app.get("/")
+def home_public():
+    return render_template("landing.html")
+
+# Alias opcional (pode manter /site apontando pra mesma landing)
+@app.get("/site")
+def landing():
+    return render_template("landing.html")
+    # ou: return redirect(url_for("home_public"))
+
+# Dashboard protegido (com trial/assinatura)
+@app.get("/app")
 @login_required
-def home():
+def dashboard():
     uid = int(current_user.id)
 
-    # cria trial automático em dev, se não houver
+    # (opcional) trial automático só em dev
     _ensure_trial(uid)
 
     sub = get_active_subscription(uid)
     trial = get_active_trial(uid)
 
-    ok_sub = bool(sub and (sub[4] == "active"))        # subscriptions.status
-    ok_trial = bool(trial and (trial[5] == "active"))  # trials.status
+    ok_sub = bool(sub and (sub[4] == "active"))
+    ok_trial = bool(trial and (trial[5] == "active"))
 
     if ok_sub or ok_trial:
-        return render_template("index.html", hide_paywall=True)
+        # se quiser manter os KPIs que você tinha:
+        kpis = {"total_veiculos": 12, "viagens_hoje": 8, "viagens_semana": 43, "alertas": 3}
+        return render_template("index.html", hide_paywall=True, kpis=kpis)
 
-    # se chegou aqui, não tem sub/trial e auto_trial está desligado (prod)
-    return redirect(url_for("landing"))
+    # sem sub/trial → volta para a landing pública
+    return redirect(url_for("home_public"))
 
-
-
-@app.get("/site")
-def landing():
-    return render_template("landing.html")
-
-@app.get("/app")
-@login_required
-def dashboard():
-    kpis = {"total_veiculos": 12, "viagens_hoje": 8, "viagens_semana": 43, "alertas": 3}
-    return render_template("index.html", kpis=kpis)
 
 @app.get("/pricing")
 @login_required
