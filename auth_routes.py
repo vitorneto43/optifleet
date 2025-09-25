@@ -64,7 +64,8 @@ def login_post():
     # Redireciona de volta para o fluxo original (checkout, etc.)
     if _safe_next(nxt):
         return redirect(nxt)
-    return redirect(url_for("home"))
+    return redirect(url_for("home_public"))
+
 
 @bp_auth.post("/register")
 def register_post():
