@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 # app.py
 from pathlib import Path
 import os
@@ -25,10 +13,12 @@ from flask import (
 from flask_login import (
     LoginManager, login_required, current_user
 )
+from core.visual.map_render import build_map, _coerce_path_to_coords
+import json
 
 # ===== DB / Users =====
 from core.db import get_user_by_id, obter_posicoes, get_active_subscription
-import duckdb  # <— novo
+
 
 
 # ===== Core (rotas, solver, mapa, manutenção) =====
@@ -60,11 +50,34 @@ from datetime import datetime, timezone
 from routes.account_routes import bp_account
 # Disponibiliza user/sub/trial globalmente nos templates (Jinja)
 from core.db import get_active_subscription, get_active_trial, create_trial
+from core.db import get_conn  # use o do core/db.py
 
 
 # ===== Export helpers =====
 from io import StringIO, BytesIO
 import csv
+
+
+# app.py (perto das helpers)
+def _point_to_linestring_km(point, line):
+    # point: (lat, lon) ; line: [(lat, lon), ...]
+    # aproximação rápida: converte p/ metros via Haversine em segmentos
+    best = 1e9
+    for i in range(1, len(line)):
+        a, b = line[i-1], line[i]
+        # projeta ponto no segmento [a,b] em “coordenadas locais” simplificadas
+        # (ou use shapely se estiver disponível)
+        da = _haversine_km(point[0], point[1], a[0], a[1])
+        db = _haversine_km(point[0], point[1], b[0], b[1])
+        ab = _haversine_km(a[0], a[1], b[0], b[1])
+        # desigualdade triangular pra bound rápido
+        if ab > 0:
+            s = (da**2 - db**2 + ab**2) / (2*ab)
+            s = max(0, min(ab, s))
+            # distância perpendicular aproximada
+            h = (da**2 - s**2) ** 0.5 if da > s else abs((da**2 - s**2))**0.5
+            best = min(best, h)
+    return best
 
 # Helpers
 # ----------------------------------------------------------------------
@@ -151,37 +164,7 @@ login_manager = LoginManager()
 login_manager.login_view = "auth.login_page"
 login_manager.init_app(app)
 
-def get_conn():
-    # conexão por arquivo; cria a pasta se necessário
-    Path(os.path.dirname(DB_PATH)).mkdir(parents=True, exist_ok=True)
-    return duckdb.connect(DB_PATH)
 
-def _init_db():
-    """Cria tabela trackers se não existir (idempotente)."""
-    with get_conn() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS trackers (
-              id         INTEGER PRIMARY KEY,
-              vehicle_id INTEGER NULL,
-              imei       TEXT NOT NULL UNIQUE,
-              vendor     TEXT,
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-def insert_tracker(imei: str, vendor: str | None = None, vehicle_id: int | None = None):
-    with get_conn() as con:
-        con.execute(
-            "INSERT INTO trackers (imei, vendor, vehicle_id) VALUES (?, ?, ?)",
-            [imei, vendor, vehicle_id]
-        )
-
-def get_tracker_by_imei(imei: str):
-    with get_conn() as con:
-        return con.execute("SELECT * FROM trackers WHERE imei = ?", [imei]).fetchone()
-
-# chama o bootstrap de schema na inicialização do app
-_init_db()
 
 @login_manager.user_loader
 def load_user(user_id: str):
@@ -254,6 +237,25 @@ app.register_blueprint(bp_contact)
 app.register_blueprint(bp_checkout)
 app.register_blueprint(bp_demo)
 app.register_blueprint(bp_account)
+
+
+# garante tabela para guardar a última roteirização do usuário
+
+with get_conn() as con:
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS last_plans (
+            user_id     INTEGER,
+            created_at  TIMESTAMP,
+            req_json    TEXT,
+            routes_json TEXT,
+            map_url     TEXT
+        );
+    """)
+    # DuckDB: PRAGMA table_info, não PRAGMA_table_info
+    cols = {r[1].lower() for r in con.execute("PRAGMA table_info('last_plans')").fetchall()}
+    if "path_json" not in cols:
+        con.execute("ALTER TABLE last_plans ADD COLUMN path_json TEXT;")
+
 
 # -----------------------------------------------------------------------------
 # Assets / Providers
@@ -608,7 +610,9 @@ def api_telemetry_events():
     stop_speed = float(request.args.get("stop_speed", 3))
     stop_minutes = float(request.args.get("stop_minutes", 5))
     harsh_turn = float(request.args.get("harsh_turn", 60))
+    buffer_km = float(request.args.get("offroute_km", 0.3))  # 300 m
 
+    # trilha e eventos básicos
     pts = _fetch_points(hours, vid)
     ev = _detect_events(
         pts,
@@ -617,7 +621,72 @@ def api_telemetry_events():
         stop_min_minutes=stop_minutes,
         harsh_turn_deg=harsh_turn
     )
+
+    # carrega a última linha planejada (por veículo)
+    paths_by_vehicle = {}
+    try:
+        uid = int(current_user.id)
+        row = get_conn().execute("""
+            SELECT path_json
+            FROM last_plans
+            WHERE user_id = ?
+            ORDER BY created_at DESC LIMIT 1
+        """, [uid]).fetchone()
+        if row and row[0]:
+            paths_by_vehicle = json.loads(row[0])
+    except Exception as e:
+        print("[offroute] falha ao carregar path_json:", e)
+
+    # off-route por ponto
+    if paths_by_vehicle:
+        for p in pts:
+            v = p["vehicle_id"]
+            line = paths_by_vehicle.get(v)
+            if not line or len(line) < 2:
+                continue
+            try:
+                d = _point_to_linestring_km((p["lat"], p["lon"]), line)
+                if d > buffer_km:
+                    ev.append({
+                        "type": "off_route",
+                        "vehicle_id": v,
+                        "ts": p["ts"],
+                        "lat": p["lat"], "lon": p["lon"],
+                        "distance_km": round(d, 3)
+                    })
+            except Exception:
+                continue
+
     return jsonify(ev)
+
+# app.py (ou routes/telemetry_routes.py)
+@app.get("/api/telemetry/series")
+@login_required
+def api_telemetry_series():
+    hours = int(request.args.get("hours", 6))
+    vid = (request.args.get("vehicle_id") or "").strip()
+    if not vid:
+        return jsonify([])
+
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT timestamp AS ts, COALESCE(speed, 0) AS speed
+        FROM telemetry
+        WHERE vehicle_id = ?
+          AND timestamp >= NOW() - INTERVAL ? HOUR
+        ORDER BY ts
+        LIMIT 20000
+    """, [vid, hours]).fetchall()
+
+    out = []
+    for ts, spd in rows:
+        try:
+            out.append({"t": str(ts), "speed": float(spd)})
+        except Exception:
+            continue
+    return jsonify(out)
+
+
 
 @app.get("/api/telemetry/export")
 @login_required
@@ -872,7 +941,7 @@ def optimize():
             buckets[vid_list[i % len(vid_list)]].append(s)
         return buckets
 
-    FORCE_PER_VEHICLE = True  # fixa um veículo por rota (simplifica visual)
+    FORCE_PER_VEHICLE = True
     if FORCE_PER_VEHICLE:
         if not has_assignment:
             veh_ids = [v.id for v in req.vehicles]
@@ -939,6 +1008,10 @@ def optimize():
     map_path = maps_dir / f"route_{ts}.html"
     map_rel = f"/static/maps/route_{ts}.html"
 
+    PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
+    veh_ids = [v.id for v in req.vehicles]
+    color_by_vehicle = {vid: PALETTE[i % len(PALETTE)] for i, vid in enumerate(veh_ids)}
+
     def _fetch_path(origin_latlon, dest_latlon):
         class P:  # mini wrapper
             def __init__(self, lat, lon):
@@ -947,12 +1020,74 @@ def optimize():
         d = P(dest_latlon[0], dest_latlon[1])
         return rp.leg_polyline(o, d)
 
+    # --- construir a linha (sequência de [lat, lon]) por veículo ---
+    def _ll(obj):
+        try:
+            return float(obj.loc.lat), float(obj.loc.lon)
+        except Exception:
+            return float(obj.lat), float(obj.lon)
+
+    all_pts = [req.depot] + req.stops
+    vehicle_paths: dict[str, list[list[float]]] = {}
+    for route in results:
+        vid = route.get("vehicle_id", "V?")
+        nodes = route.get("nodes_abs") or route.get("nodes") or []
+        if len(nodes) < 2:
+            continue
+
+        full_coords: list[list[float]] = []
+        for a, b in zip(nodes[:-1], nodes[1:]):
+            o_lat, o_lon = _ll(all_pts[a])
+            d_lat, d_lon = _ll(all_pts[b])
+
+            leg_coords: list[list[float]] = []
+            try:
+                path = rp.leg_polyline(type("P", (), {"lat": o_lat, "lon": o_lon})(),
+                                       type("P", (), {"lat": d_lat, "lon": d_lon})())
+                leg_coords = _coerce_path_to_coords(path) or []
+            except Exception:
+                leg_coords = []
+
+            if not leg_coords:
+                leg_coords = [[o_lat, o_lon], [d_lat, d_lon]]
+
+            if full_coords and leg_coords and full_coords[-1] == leg_coords[0]:
+                full_coords.extend(leg_coords[1:])
+            else:
+                full_coords.extend(leg_coords)
+
+        if full_coords:
+            vehicle_paths[vid] = full_coords
+
+    # --- gerar o mapa ---
     map_ok = True
     try:
-        build_map([req.depot] + req.stops, results, str(map_path), fetch_path=_fetch_path)
+        build_map(
+            [req.depot] + req.stops,
+            results,
+            str(map_path),
+            fetch_path=_fetch_path,
+            color_by_vehicle=color_by_vehicle,
+            legend_title="Rotas por veículo"
+        )
     except Exception as e:
         print("[MAP] Falha ao gerar mapa:", e)
         map_ok = False
+
+    # --- salvar a última roteirização do usuário (inclui path_json!) ---
+    uid = int(current_user.id)
+    with get_conn() as con:
+        con.execute("DELETE FROM last_plans WHERE user_id = ?", [uid])
+        con.execute("""
+            INSERT INTO last_plans (user_id, created_at, req_json, routes_json, map_url, path_json)
+            VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+        """, [
+            uid,
+            json.dumps(raw),
+            json.dumps(results),
+            map_rel if map_ok else "",
+            json.dumps(vehicle_paths)
+        ])
 
     return jsonify({
         "status": "ok",
@@ -962,6 +1097,24 @@ def optimize():
         "maintenance": maintenance,
         "map_url": map_rel if map_ok else ""
     })
+
+@app.get("/api/optimize/last_map")
+@login_required
+def api_last_map():
+    uid = int(current_user.id)
+    row = get_conn().execute("""
+      SELECT map_url
+      FROM last_plans
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    """, [uid]).fetchone()
+    if not row or not row[0]:
+        return jsonify({"ok": False, "map_url": ""}), 404
+    return jsonify({"ok": True, "map_url": row[0]})
+
+
+
 
 # -----------------------------------------------------------------------------
 # Run
