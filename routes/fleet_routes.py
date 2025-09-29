@@ -1,189 +1,360 @@
 # routes/fleet_routes.py
+from __future__ import annotations
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from datetime import datetime, timezone
-from core.db import list_vehicles, upsert_vehicle, delete_vehicle, get_vehicle, import_vehicles_bulk, get_conn
+from typing import Any, Dict, List
+
+from core.db import get_conn  # DuckDB connection
 
 bp_fleet = Blueprint("fleet", __name__, url_prefix="/api/fleet")
 
-def _client_id():
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+def _client_id() -> int:
+    # se você tiver multi-tenant por client_id na tabela vehicles, adapte aqui.
+    # no schema atual, vehicles.id é global e não há client_id explícito — então
+    # ignoramos no SQL. Mantive a função por compatibilidade.
     return int(getattr(current_user, "id", 0) or 0)
 
+def _rows_to_dicts(conn, rows):
+    cols = [c[0] for c in conn.description]  # duckdb: disponível após execute()
+    out = []
+    for r in rows:
+        d = {}
+        for k, v in zip(cols, r):
+            d[k] = v
+        out.append(d)
+    return out
+
+def _validate_imei(imei: str) -> bool:
+    return imei.isdigit() and len(imei) == 15
+
+def _merge_vehicle(data: Dict[str, Any]) -> None:
+    """
+    Upsert de vehicle via MERGE no DuckDB.
+    Campos aceitos: id, name, plate, driver, capacity, status,
+    next_service_km, last_service_km, tags, notes, obd_id
+    """
+    with get_conn() as con:
+        # normaliza defaults
+        record = {
+            "id": str(data.get("id", "")).strip(),
+            "name": (data.get("name") or "").strip() or None,
+            "plate": (data.get("plate") or "").strip() or None,
+            "driver": (data.get("driver") or "").strip() or None,
+            "capacity": int(data.get("capacity") or 0),
+            "status": (data.get("status") or "offline"),
+            "next_service_km": float(data.get("next_service_km") or 0),
+            "last_service_km": float(data.get("last_service_km") or 0),
+            "tags": (data.get("tags") or "").strip() or None,
+            "notes": (data.get("notes") or "").strip() or None,
+            "obd_id": (data.get("obd_id") or "").strip() or None,
+        }
+        if not record["id"]:
+            raise ValueError("missing_id")
+
+        # Garante tabela vehicles (idempotente)
+        con.execute("""
+          CREATE TABLE IF NOT EXISTS vehicles (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            plate TEXT,
+            driver TEXT,
+            capacity INTEGER,
+            status TEXT,
+            next_service_km DOUBLE,
+            last_service_km DOUBLE,
+            tags TEXT,
+            notes TEXT,
+            obd_id TEXT
+          );
+        """)
+
+        # MERGE
+        con.execute("""
+          MERGE INTO vehicles AS v
+          USING (
+            SELECT ?::TEXT AS id,
+                   ?::TEXT AS name,
+                   ?::TEXT AS plate,
+                   ?::TEXT AS driver,
+                   ?::INTEGER AS capacity,
+                   ?::TEXT AS status,
+                   ?::DOUBLE AS next_service_km,
+                   ?::DOUBLE AS last_service_km,
+                   ?::TEXT AS tags,
+                   ?::TEXT AS notes,
+                   ?::TEXT AS obd_id
+          ) AS s
+          ON v.id = s.id
+          WHEN MATCHED THEN UPDATE SET
+            name = s.name,
+            plate = s.plate,
+            driver = s.driver,
+            capacity = s.capacity,
+            status = s.status,
+            next_service_km = s.next_service_km,
+            last_service_km = s.last_service_km,
+            tags = s.tags,
+            notes = s.notes,
+            obd_id = s.obd_id
+          WHEN NOT MATCHED THEN
+            INSERT (id, name, plate, driver, capacity, status, next_service_km, last_service_km, tags, notes, obd_id)
+            VALUES (s.id, s.name, s.plate, s.driver, s.capacity, s.status, s.next_service_km, s.last_service_km, s.tags, s.notes, s.obd_id);
+        """, [
+            record["id"], record["name"], record["plate"], record["driver"],
+            record["capacity"], record["status"], record["next_service_km"],
+            record["last_service_km"], record["tags"], record["notes"], record["obd_id"]
+        ])
+
+def _merge_tracker_for_vehicle(vehicle_id: str, imei: str | None, vendor: str | None) -> None:
+    # garante tabela trackers
+    with get_conn() as con:
+        con.execute("""
+          CREATE TABLE IF NOT EXISTS trackers (
+            id         INTEGER PRIMARY KEY,
+            vehicle_id TEXT,
+            imei       TEXT NOT NULL UNIQUE,
+            vendor     TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        """)
+
+        if imei:
+            # upsert do tracker por IMEI e vincula ao vehicle_id
+            con.execute("""
+              MERGE INTO trackers AS t
+              USING (
+                SELECT ?::TEXT AS imei,
+                       ?::TEXT AS vendor,
+                       ?::TEXT AS vehicle_id
+              ) AS s
+              ON t.imei = s.imei
+              WHEN MATCHED THEN
+                UPDATE SET vendor = s.vendor, vehicle_id = s.vehicle_id
+              WHEN NOT MATCHED THEN
+                INSERT (imei, vendor, vehicle_id)
+                VALUES (s.imei, s.vendor, s.vehicle_id);
+            """, [imei, vendor, vehicle_id])
+        else:
+            # se IMEI vazio: opcional — desvincular qualquer tracker do veículo
+            con.execute("UPDATE trackers SET vehicle_id = NULL WHERE vehicle_id = ?", [vehicle_id])
+
+# ---------------------------------------------------------------------
+# Listar veículos (com IMEI/vendor e última posição)
+# ---------------------------------------------------------------------
 @bp_fleet.get("/vehicles")
 @login_required
 def api_list_vehicles():
-    q = request.args.get("q")
-    only = request.args.get("status")
-    rows = list_vehicles(_client_id(), q, only)
-    # converte Row para dict
-    out = [dict(r) for r in rows]
-    return jsonify(out)
+    q = (request.args.get("q") or "").strip()
+    only = (request.args.get("status") or "").strip().lower()
 
+    where = []
+    params: List[Any] = []
+
+    if q:
+        # busca parcial em id/name/plate/driver/tags
+        where.append("""(
+            v.id ILIKE ? OR v.name ILIKE ? OR v.plate ILIKE ? OR
+            v.driver ILIKE ? OR v.tags ILIKE ?
+        )""")
+        pat = f"%{q}%"
+        params += [pat, pat, pat, pat, pat]
+
+    if only in ("online", "offline", "maintenance"):
+        where.append("COALESCE(v.status,'offline') = ?")
+        params.append(only)
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    with get_conn() as conn:
+        # última posição via agregação em telemetry
+        sql = f"""
+          SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
+                 v.next_service_km, v.last_service_km, v.tags, v.notes, v.obd_id,
+                 tp.last_lat, tp.last_lon, tp.last_ts,
+                 t.imei, t.vendor
+          FROM vehicles v
+          LEFT JOIN (
+            SELECT vehicle_id,
+                   ANY_VALUE(lat) AS last_lat,
+                   ANY_VALUE(lon) AS last_lon,
+                   MAX(timestamp)  AS last_ts
+            FROM telemetry
+            GROUP BY vehicle_id
+          ) tp ON tp.vehicle_id = v.id
+          LEFT JOIN trackers t ON t.vehicle_id = v.id
+          {where_sql}
+          ORDER BY v.id
+        """
+        rows = conn.execute(sql, params).fetchall()
+        out = _rows_to_dicts(conn, rows)
+        # normalização leve
+        for r in out:
+            # datas -> string ISO
+            if r.get("last_ts") is not None:
+                r["last_ts"] = str(r["last_ts"])
+        return jsonify(out)
+
+# ---------------------------------------------------------------------
+# Obter um veículo
+# ---------------------------------------------------------------------
 @bp_fleet.get("/vehicles/<vid>")
 @login_required
 def api_get_vehicle(vid):
-    r = get_vehicle(_client_id(), vid)
-    if not r:
-        return jsonify({"ok": False, "error": "not_found"}), 404
-    return jsonify(dict(r))
+    with get_conn() as conn:
+        rows = conn.execute("""
+          SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
+                 v.next_service_km, v.last_service_km, v.tags, v.notes, v.obd_id,
+                 t.imei, t.vendor
+          FROM vehicles v
+          LEFT JOIN trackers t ON t.vehicle_id = v.id
+          WHERE v.id = ?
+        """, [vid]).fetchall()
+        if not rows:
+            return jsonify({"ok": False, "error": "not_found"}), 404
+        d = _rows_to_dicts(conn, rows)[0]
+        if d.get("last_ts") is not None:
+            d["last_ts"] = str(d["last_ts"])
+        return jsonify(d)
 
+# ---------------------------------------------------------------------
+# Criar veículo (com IMEI/vendor)
+# ---------------------------------------------------------------------
 @bp_fleet.post("/vehicles")
 @login_required
 def api_create_vehicle():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     if not data.get("id"):
         return jsonify({"ok": False, "error": "missing_id"}), 400
-    data["id"] = str(data["id"]).strip()
-    data["status"] = data.get("status") or "offline"
-    upsert_vehicle(_client_id(), data)
+
+    imei = (data.get("imei") or "").strip()
+    vendor = (data.get("vendor") or "").strip() or None
+
+    if imei and not _validate_imei(imei):
+        return jsonify({"ok": False, "error": "IMEI inválido (use 15 dígitos)."}), 400
+
+    try:
+        _merge_vehicle(data)
+        _merge_tracker_for_vehicle(str(data["id"]).strip(), imei if imei else None, vendor)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
     return jsonify({"ok": True})
 
+# ---------------------------------------------------------------------
+# Atualizar veículo (com IMEI/vendor)
+# ---------------------------------------------------------------------
 @bp_fleet.put("/vehicles/<vid>")
 @login_required
 def api_update_vehicle(vid):
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     data["id"] = vid
-    upsert_vehicle(_client_id(), data)
+
+    imei = (data.get("imei") or "").strip()
+    vendor = (data.get("vendor") or "").strip() or None
+    if imei and not _validate_imei(imei):
+        return jsonify({"ok": False, "error": "IMEI inválido (use 15 dígitos)."}), 400
+
+    try:
+        _merge_vehicle(data)
+        _merge_tracker_for_vehicle(str(vid), imei if imei else None, vendor)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
     return jsonify({"ok": True})
 
+# ---------------------------------------------------------------------
+# Excluir veículo (desvincula tracker)
+# ---------------------------------------------------------------------
 @bp_fleet.delete("/vehicles/<vid>")
 @login_required
 def api_delete_vehicle(vid):
-    delete_vehicle(_client_id(), vid)
+    with get_conn() as con:
+        # garante tabela vehicles
+        con.execute("""
+          CREATE TABLE IF NOT EXISTS vehicles (
+            id TEXT PRIMARY KEY
+          );
+        """)
+        # desvincula trackers
+        con.execute("UPDATE trackers SET vehicle_id = NULL WHERE vehicle_id = ?", [vid])
+        # remove o veículo
+        con.execute("DELETE FROM vehicles WHERE id = ?", [vid])
     return jsonify({"ok": True})
 
+# ---------------------------------------------------------------------
+# Importar veículos em lote (aceita imei/vendor)
+# Body: { rows: [{id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor}, ...] }
+# ---------------------------------------------------------------------
 @bp_fleet.post("/vehicles/import")
 @login_required
 def api_import_vehicles():
-    """
-    Body: { rows: [{id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes}, ...] }
-    """
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     rows = data.get("rows") or []
     if not isinstance(rows, list) or not rows:
         return jsonify({"ok": False, "error": "empty_rows"}), 400
-    import_vehicles_bulk(_client_id(), rows)
-    return jsonify({"ok": True, "count": len(rows)})
 
-# (Opcional) Marcar status manualmente
-@bp_fleet.post("/vehicles/<vid>/status")
-@login_required
-def api_set_status(vid):
-    st = (request.json or {}).get("status")
-    if st not in ("online","offline","maintenance"):
-        return jsonify({"ok": False, "error": "bad_status"}), 400
-    upsert_vehicle(_client_id(), {"id": vid, "status": st})
-    return jsonify({"ok": True})
+    ok, bad = 0, 0
+    for row in rows:
+        try:
+            if not row.get("id"):
+                bad += 1
+                continue
+            imei = (row.get("imei") or "").strip()
+            vendor = (row.get("vendor") or "").strip() or None
+            if imei and not _validate_imei(imei):
+                # ignora IMEI inválido, mas importa o veículo
+                imei = None
+            _merge_vehicle(row)
+            _merge_tracker_for_vehicle(str(row["id"]).strip(), imei, vendor)
+            ok += 1
+        except Exception:
+            bad += 1
 
-# (Opcional) Atualizar “última posição” a partir das posições recentes
+    return jsonify({"ok": True, "imported": ok, "skipped": bad})
+
+# ---------------------------------------------------------------------
+# (Opcional) Atualizar status/última posição a partir de telemetry
+# ---------------------------------------------------------------------
 @bp_fleet.post("/vehicles/refresh_last_pos")
 @login_required
 def refresh_last_pos():
-    con = get_conn()
-    client_id = _client_id()
-    # pega última posição por veículo
-    rows = con.execute("""
-      WITH lastp AS (
-        SELECT vehicle_id, max(ts) AS last_ts
-        FROM telem_positions
-        WHERE client_id = ?
-        GROUP BY vehicle_id
-      )
-      SELECT p.vehicle_id, p.lat, p.lon, p.speed, p.ts
-      FROM telem_positions p
-      JOIN lastp l ON l.vehicle_id=p.vehicle_id AND l.last_ts=p.ts
-      WHERE p.client_id=?
-    """, [client_id, client_id]).fetchall()
-
     now = datetime.now(timezone.utc)
-    for r in rows:
-        # status online se última posição < 10min
-        is_online = (now - r["ts"]).total_seconds() < 600
-        upsert_vehicle(client_id, {
-            "id": r["vehicle_id"],
-            "last_lat": r["lat"], "last_lon": r["lon"],
-            "last_speed": r["speed"], "last_ts": r["ts"],
-            "status": "online" if is_online else "offline"
-        })
-    return jsonify({"ok": True, "count": len(rows)})
-
-# ---- Vehicles ----
-@bp_fleet.get("/vehicles")
-@login_required
-def vehicles_list():
-    client_id = int(current_user.id)
-    return jsonify(db.vehicles_list_with_tracker(client_id))
-
-@bp_fleet.post("/vehicles")
-@login_required
-def vehicles_create():
-    client_id = int(current_user.id)
-    payload = request.get_json(force=True) or {}
-    # front manda: {code, model, capacity, avg_consumption_km_l}
-    veh_id = (payload.get("code") or "").strip()
-    if not veh_id:
-        return jsonify({"error": "Informe o código/placa (code)."}), 400
-    db.vehicle_upsert(client_id, {
-        "id": veh_id,
-        "plate": veh_id,
-        "name": payload.get("model"),
-        "capacity": int(payload.get("capacity") or 0),
-        "tags": None,
-    })
-    return jsonify({"id": veh_id})
-
-@bp_fleet.patch("/vehicles/<vid>/bind_tracker")
-@login_required
-def vehicles_bind_tracker(vid):
-    client_id = int(current_user.id)
-    body = request.get_json(force=True) or {}
-    tracker_id = (body.get("tracker_id") or "").strip()
-    force = bool(body.get("force"))
-    if not tracker_id:
-        return jsonify({"error": "Informe tracker_id"}), 400
-
-    if not db.vehicle_get(client_id, vid):
-        return jsonify({"error": "Veículo não encontrado"}), 404
-
-    # cria/obtém tracker e tenta vincular
-    db.tracker_get_or_create(client_id, tracker_id)
-    ok = db.tracker_bind_vehicle(client_id, tracker_id, vid, force=force)
-    if not ok:
-        return jsonify({"error": "Rastreador já vinculado a outro veículo. Envie force=true para sobrescrever."}), 409
-    return jsonify({"status": "ok", "tracker_id": tracker_id})
-
-@bp_fleet.patch("/vehicles/<vid>/unbind_tracker")
-@login_required
-def vehicles_unbind_tracker(vid):
-    client_id = int(current_user.id)
-    if not db.vehicle_get(client_id, vid):
-        return jsonify({"error": "Veículo não encontrado"}), 404
-    db.tracker_unbind_vehicle(client_id, vid)
-    return jsonify({"status": "ok"})
-
-# ---- Trackers (opcional: telas futuras) ----
-@bp_fleet.get("/trackers")
-@login_required
-def trackers_list():
-    client_id = int(current_user.id)
-    rows = db.tracker_list(client_id)
-    out = []
-    for r in rows:
-        out.append({
-            "tracker_id": r[0],
-            "secret_token": r[1],     # exibir só se necessário
-            "vehicle_id": r[2],
-            "imei": r[3],
-            "status": r[4],
-        })
-    return jsonify(out)
-
-@bp_fleet.post("/trackers/<tracker_id>/rotate_token")
-@login_required
-def trackers_rotate(tracker_id):
-    client_id = int(current_user.id)
-    newtok = db.tracker_rotate_token(client_id, tracker_id)
-    return jsonify({"tracker_id": tracker_id, "secret_token": newtok})
+    with get_conn() as con:
+        # última posição por veículo
+        rows = con.execute("""
+          WITH lastp AS (
+            SELECT vehicle_id, MAX(timestamp) AS last_ts
+            FROM telemetry
+            GROUP BY vehicle_id
+          )
+          SELECT p.vehicle_id, p.lat, p.lon, p.speed, p.timestamp AS ts
+          FROM telemetry p
+          JOIN lastp l
+            ON l.vehicle_id = p.vehicle_id AND l.last_ts = p.timestamp
+        """).fetchall()
+        cols = [c[0] for c in con.description]
+        for r in rows:
+            rec = dict(zip(cols, r))
+            is_online = False
+            try:
+                ts = rec["ts"]
+                # ts pode vir naive — assume UTC
+                if getattr(ts, "tzinfo", None) is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                is_online = (now - ts).total_seconds() < 600
+            except Exception:
+                pass
+            _merge_vehicle({
+                "id": rec["vehicle_id"],
+                "status": "online" if is_online else "offline",
+                # campos de “last_*” estão no schema? se não, ignore.
+                # Mantendo apenas status aqui para não conflitar com seu schema atual.
+            })
+    return jsonify({"ok": True})
 
 
 

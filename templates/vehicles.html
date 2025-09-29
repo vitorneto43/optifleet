@@ -62,7 +62,9 @@
       <thead>
         <tr>
           <th>ID</th><th>Nome</th><th>Placa</th><th>Motorista</th><th>Cap.</th><th>Status</th>
-          <th>Última posição</th><th>Próx. serv. (km)</th><th>Tags</th><th></th>
+          <th>Última posição</th><th>Próx. serv. (km)</th><th>IMEI</th><th>Tags</th><th></th>
+
+
         </tr>
       </thead>
       <tbody></tbody>
@@ -79,6 +81,10 @@
         <div><label>Placa</label><input id="m_plate"></div>
         <div><label>Motorista</label><input id="m_driver"></div>
         <div><label>Capacidade</label><input id="m_capacity" type="number"></div>
+        <div><label for="m_imei">IMEI do rastreador</label><input id="m_imei" placeholder="15 dígitos" maxlength="15" pattern="\d{15}"></div>
+        <div><label for="m_vendor">Fabricante (opcional)</label><input id="m_vendor" placeholder="Ex.: TK-Star, Concox"></div>
+
+
         <div>
           <label>Status</label>
           <select id="m_status">
@@ -104,7 +110,7 @@
   <div class="modal" id="import">
     <div>
       <h3>Importar veículos</h3>
-      <p class="muted">Cole JSON (lista de objetos) ou CSV com cabeçalhos: <code>id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes</code></p>
+      <p class="muted">Cole JSON (lista de objetos) ou CSV com cabeçalhos: <code>id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor</code></p>
       <textarea id="imp_text" rows="10" style="width:100%;padding:8px;border-radius:8px;background:#0b132b;color:#fff;border:1px solid rgba(255,255,255,.15)"></textarea>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
         <button class="btn ghost" onclick="closeImport()">Cancelar</button>
@@ -139,23 +145,32 @@ async function load(){
       <td><span class="badge ${badge}">${v.status||'offline'}</span></td>
       <td>${lastp}</td>
       <td>${v.next_service_km ?? 0}</td>
+      <td>${v.imei || ''}</td>              <!-- 👈 ADICIONE ESTA LINHA -->
       <td>${v.tags||''}</td>
       <td class="right">
         <button class="btn ghost" onclick='edit(${JSON.stringify(v)})'>Editar</button>
         <button class="btn red" onclick='delVeh("${v.id}")'>Excluir</button>
       </td>
     `;
+
     TBL.appendChild(tr);
   });
   info.textContent = `${data.length} veículo(s)`;
 }
 
-function openModal(){ document.getElementById('modal').style.display='flex'; resetForm(); }
+function openModal(){
+  document.getElementById('modal').style.display='flex';
+  resetForm();
+  m_id.disabled = false;     // 👈 garante que pode digitar ID no “novo”
+}
+
 function closeModal(){ document.getElementById('modal').style.display='none'; }
 function resetForm(){
   m_id.value=""; m_name.value=""; m_plate.value=""; m_driver.value="";
   m_capacity.value=""; m_status.value="offline"; m_obd.value="";
   m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
+  m_imei.value=""; m_vendor.value="";
+
 }
 function edit(v){
   document.getElementById('modal').style.display='flex';
@@ -163,6 +178,9 @@ function edit(v){
   m_name.value=v.name||""; m_plate.value=v.plate||""; m_driver.value=v.driver||"";
   m_capacity.value=v.capacity??""; m_status.value=v.status||"offline"; m_obd.value=v.obd_id||"";
   m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
+  m_imei.value = v.imei || "";
+  m_vendor.value = v.vendor || "";
+
 }
 async function save(){
   const body = {
@@ -170,8 +188,17 @@ async function save(){
     driver: m_driver.value.trim(), capacity: parseInt(m_capacity.value||"0"),
     status: m_status.value, obd_id: m_obd.value.trim(), tags: m_tags.value.trim(),
     next_service_km: parseFloat(m_nextkm.value||"0"), last_service_km: parseFloat(m_lastkm.value||"0"),
-    notes: m_notes.value.trim()
+    notes: m_notes.value.trim(),
+    imei: m_imei.value.trim(),            // 👈 novo
+    vendor: m_vendor.value.trim()         // 👈 novo
   };
+
+  if (body.imei && !/^\d{15}$/.test(body.imei)) {
+    alert("IMEI deve ter 15 dígitos numéricos.");
+    return;
+  }
+
+
   if(!body.id){ alert("Informe o ID do veículo."); return; }
   const method = m_id.disabled ? 'PUT' : 'POST';
   const url = m_id.disabled ? `/api/fleet/vehicles/${encodeURIComponent(body.id)}` : '/api/fleet/vehicles';
@@ -213,14 +240,23 @@ async function doImport(){
 
 function csvParse(s){
   const lines = s.split(/\r?\n/).filter(Boolean);
-  const header = lines.shift().split(',').map(x=>x.trim());
+  const header = lines.shift().split(',').map(x=>x.trim().toLowerCase());
   return lines.map(line=>{
-    const cols = line.split(','); const o = {};
-    header.forEach((h,i)=> o[h]= (cols[i]??'').trim());
-    ['capacity','next_service_km'].forEach(k => { if(o[k]!==undefined && o[k]!=='') o[k] = Number(o[k]); });
+    const cols = line.split(',');
+    const o = {};
+    header.forEach((h,i)=> o[h] = (cols[i]??'').trim());
+    // numéricos
+    ['capacity','next_service_km','last_service_km'].forEach(k=>{
+      if(o[k]!==undefined && o[k]!=='') o[k] = Number(o[k]);
+    });
+    // validação leve de imei (se existir)
+    if (o.imei && !/^\d{15}$/.test(o.imei)) {
+      o.imei = ''; // ignora inválido
+    }
     return o;
   });
 }
+
 
 window.addEventListener('DOMContentLoaded', load);
 </script>

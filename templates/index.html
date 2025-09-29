@@ -57,11 +57,11 @@
     <nav>
       {% if current_user.is_authenticated %}
         <span style="opacity:.8;margin-right:12px;">{{ current_user.email }}</span>
-        <a href="/" style="color:#fff;margin-right:12px;text-decoration:none;">Dashboard</a>
+        <a href="/app" style="color:#fff;margin-right:12px;text-decoration:none;">Dashboard</a>
         <a href="/vehicles" style="color:#fff;margin-right:12px;text-decoration:none;">Frota</a>
         <a href="/tracking" style="color:#fff;margin-right:12px;text-decoration:none;">Telemetria</a>
         <a href="/account" style="color:#fff;margin-right:12px;text-decoration:none;">Minha conta</a>
-<a href="/billing/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
+        <a href="/billing/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
         <form method="post" action="/logout" style="display:inline;"><button class="btn secondary">Sair</button></form>
       {% else %}
 
@@ -108,6 +108,14 @@
       <span class="kpi-icon">⚠️</span>
       <div class="kpi-value">{{ (kpis.alertas if kpis else 0) }}</div>
       <div class="kpi-label">Alertas Recentes</div>
+    </div>
+  </section>
+
+  <section style="margin-top:16px">
+    <h3 style="margin:8px 0">Última roteirização</h3>
+    <div id="lastMapWrap" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+      <iframe id="lastMap" src="" width="100%" height="520" style="display:none;border:0"></iframe>
+      <div id="noMap" style="padding:12px;color:#6b7280">Nenhuma roteirização recente.</div>
     </div>
   </section>
 
@@ -214,8 +222,8 @@
           <button class="btn secondary" onclick="fetch('/demo/start',{method:'POST'}).then(()=>loadLatestPositions())">Iniciar simulação (3 veículos)</button>
           <button class="btn secondary" onclick="fetch('/demo/stop',{method:'POST'})">Parar simulação</button>
         </div>
-  <h3 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-      <span>Rastreamento ao vivo</span>
+      <h3 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <span>Rastreamento ao vivo</span>
 
       <!-- Controles do histórico dentro do cabeçalho -->
       <div class="hist-controls">
@@ -615,6 +623,30 @@ window.addEventListener('DOMContentLoaded', () => {
   loadLatestPositions();
   startSSE();
 });
+
+  async function loadLastMap() {
+  try {
+    const r = await fetch('/api/optimize/last_map', { credentials: 'same-origin' });
+    if (!r.ok) throw 0;
+    const { ok, map_url } = await r.json();
+    const iframe = document.getElementById('lastMap');
+    const noMap = document.getElementById('noMap');
+    if (ok && map_url) {
+      // cache-busting pra evitar servir HTML antigo
+      iframe.src = map_url + (map_url.includes('?') ? '&' : '?') + 'v=' + Date.now();
+      iframe.style.display = 'block';
+      noMap.style.display = 'none';
+    } else {
+      iframe.style.display = 'none';
+      noMap.style.display = 'block';
+    }
+  } catch {
+    // mantém a mensagem "Nenhuma roteirização recente"
+  }
+}
+
+// carrega automaticamente ao abrir o dashboard
+document.addEventListener('DOMContentLoaded', loadLastMap);
 </script>
 
 </body>

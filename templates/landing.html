@@ -56,14 +56,20 @@
         Planeje, acompanhe e melhore sua operação de ponta a ponta. <br>
         Menos km, menos custo, mais entregas no horário — e clientes felizes.
       </p>
-      <div class="hero__cta">
-        <!-- Hero CTAs -->
-        <a href="/login?next=/trial/start" class="btn btn--xl">Teste agora</a>
-        <!-- Página pública de demo (sem login) -->
+     <div class="hero__cta">
+        {% if current_user.is_authenticated %}
+          <!-- Usuário já logado → manda pro dashboard -->
+          <a href="{{ url_for('dashboard') }}" class="btn btn--xl">Ir para o Dashboard</a>
+        {% else %}
+          <!-- Visitante → empurra pro login já com next=/trial/start -->
+          <a href="{{ url_for('auth.login_page', next='/trial/start') }}" class="btn btn--xl">Teste agora</a>
+        {% endif %}
+
+        <!-- Sempre disponíveis -->
         <a href="/demo" class="btn btn--xl btn--ghost">Ver demo</a>
         <a href="/contact" class="btn btn--xl btn--ghost">Falar com vendas</a>
-
       </div>
+
 
       <div class="hero__badges">
         <span>⚡ Otimização multi-veículo</span>
