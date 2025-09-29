@@ -1,5 +1,5 @@
 # core/visual/map_render.py
-from typing import List, Dict, Any, Callable, Optional, Sequence
+from typing import List, Dict, Any, Optional, Sequence
 import folium
 from folium.plugins import PolyLineTextPath
 
@@ -11,6 +11,7 @@ def _latlon(obj):
     return float(obj[0]), float(obj[1])
 
 def _decode_polyline(encoded: str) -> List[List[float]]:
+    # Decodifica polyline Google
     coords = []
     index = lat = lng = 0
     length = len(encoded)
@@ -59,7 +60,6 @@ def _coerce_path_to_coords(path: Any) -> List[List[float]]:
         try:
             return [[float(p[0]), float(p[1])] for p in path]
         except Exception:
-            # cai para mais tentativas
             pass
 
     # 4) lista de dicts com lat/lng (ou latitude/longitude)
@@ -76,30 +76,28 @@ def _coerce_path_to_coords(path: Any) -> List[List[float]]:
 
     # 5) dict com polyline/points
     if isinstance(path, dict):
-        # Google Directions (overview)
         try:
             ov = path.get("routes", [{}])[0].get("overview_polyline", {})
             if "points" in ov:
                 return _decode_polyline(ov["points"])
         except Exception:
             pass
-        # chaves comuns
         for key in ("polyline", "points", "path"):
             if key in path and isinstance(path[key], str):
                 return _decode_polyline(path[key])
             if key in path and isinstance(path[key], list):
                 return _coerce_path_to_coords(path[key])
 
-    # fallback: nada reconhecido
     return []
 
 def build_map(
-    points: List[Any],
-    routes: List[Dict[str, Any]],
-    out_html: str,
-    *,
-    fetch_path: Optional[Callable[[Sequence[float], Sequence[float]], Any]] = None,
-    vehicles: Optional[List[Dict[str, Any]]] = None
+    points: Sequence[Any],
+    routes: Sequence[Dict[str, Any]],
+    out_html_path: str,
+    fetch_path: Optional[Any] = None,
+    color_by_vehicle: Optional[Dict[str, str]] = None,
+    legend_title: Optional[str] = None,
+    vehicles: Optional[Sequence[Any]] = None,  # posições atuais (opcional)
 ) -> None:
     if not points:
         raise ValueError("Sem pontos para desenhar.")
@@ -107,23 +105,29 @@ def build_map(
     c_lat, c_lon = _latlon(points[0])
     m = folium.Map(location=[c_lat, c_lon], zoom_start=12, tiles="cartodbpositron")
 
+    # depósito
     folium.Marker([c_lat, c_lon], popup="Depósito",
                   icon=folium.Icon(color="green", icon="home")).add_to(m)
 
+    # paradas
     for idx, p in enumerate(points[1:], start=1):
         lat, lon = _latlon(p)
         folium.CircleMarker([lat, lon], radius=5, color="#3a86ff",
                             fill=True, fill_opacity=0.95,
                             popup=f"Stop {idx}").add_to(m)
 
+    # paleta fallback
     palette = ["#3a86ff", "#ff006e", "#fb5607", "#8338ec",
                "#ffbe0b", "#06d6a0", "#118ab2", "#ef476f"]
 
+    # rotas
     for r_i, route in enumerate(routes):
-        color = palette[r_i % len(palette)]
         nodes = route.get("nodes_abs") or route.get("nodes") or []
         if len(nodes) < 2:
             continue
+
+        veh_id = route.get("vehicle_id", f"V{r_i+1}")
+        color = (color_by_vehicle or {}).get(veh_id, palette[r_i % len(palette)])
 
         full_coords: List[List[float]] = []
         for a, b in zip(nodes[:-1], nodes[1:]):
@@ -148,21 +152,21 @@ def build_map(
         if not full_coords:
             continue
 
-        pl = folium.PolyLine(full_coords, weight=5, opacity=0.95, color=color).add_to(m)
+        pl = folium.PolyLine(full_coords, weight=5, opacity=0.95, color=color, tooltip=f"Veículo {veh_id}").add_to(m)
         PolyLineTextPath(
             pl, " ▶▶▶ ", repeat=True, offset=8,
             attributes={"fill": color, "font-weight": "bold", "font-size": "16"}
         ).add_to(m)
 
-        v = route.get("vehicle_id", f"V{r_i+1}")
         t = route.get("time_min", "?")
         d = route.get("dist_km", "?")
         folium.Marker(
             full_coords[-1],
-            popup=f"Veículo {v} — {t} min / {d} km",
+            popup=f"Veículo {veh_id} — {t} min / {d} km",
             icon=folium.Icon(color="blue", icon="flag")
         ).add_to(m)
 
+    # posições atuais (opcional)
     if vehicles:
         for v in vehicles:
             try:
@@ -178,7 +182,30 @@ def build_map(
             except Exception:
                 pass
 
-    m.save(out_html)
+    # legenda
+    if color_by_vehicle:
+        items = "".join(
+            f'<div style="display:flex;align-items:center;gap:8px;margin:2px 0">'
+            f'<span style="display:inline-block;width:16px;height:3px;background:{c}"></span>'
+            f'<span style="font:12px/1.2 system-ui">{vid}</span>'
+            f'</div>'
+            for vid, c in color_by_vehicle.items()
+        )
+        title = legend_title or "Rotas"
+        legend_html = f"""
+        <div style="
+          position: fixed; bottom: 20px; left: 20px; z-index: 9999;
+          background: rgba(17,24,39,.92); color: #fff; padding: 10px 12px;
+          border: 1px solid rgba(255,255,255,.12); border-radius: 10px;
+        ">
+          <div style="font-weight:600;margin-bottom:6px">{title}</div>
+          {items}
+        </div>
+        """
+        m.get_root().html.add_child(folium.Element(legend_html))
+
+    m.save(out_html_path)
+
 
 
 

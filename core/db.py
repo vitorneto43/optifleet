@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta, timezone
 import duckdb
 import secrets
+import os
 
 # =========================
 # Config / Conexão
@@ -51,19 +52,6 @@ def _init_schema():
       next_service_km DOUBLE DEFAULT 0,
       notes TEXT,
       PRIMARY KEY (client_id, id)
-    );
-    """)
-
-    # Trackers (corrigido: tracker_id como chave; imei opcional; status)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS trackers (
-      client_id INTEGER,
-      tracker_id TEXT,         -- pode ser o próprio IMEI
-      secret_token TEXT,
-      vehicle_id TEXT,
-      imei TEXT,               -- opcional
-      status TEXT,             -- 'active' | 'blocked'
-      PRIMARY KEY (client_id, tracker_id)
     );
     """)
 
@@ -134,7 +122,40 @@ def _init_schema():
     );
     """)
 
-    # Índices úteis
+
+    con.execute("""
+         CREATE TABLE IF NOT EXISTS trackers (
+              id            INTEGER PRIMARY KEY,
+              client_id     INTEGER,
+              tracker_id    TEXT,                 -- identificador lógico (pode ser = IMEI)
+              secret_token  TEXT,                 -- token para autenticar ingestão
+              vehicle_id    TEXT,
+              imei          TEXT,                 -- IMEI (único se presente)
+              vendor        TEXT,                 -- fabricante (opcional)
+              status        TEXT DEFAULT 'active',
+              created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+    # ---- migrações leves dentro do MESMO con ----
+    def _ensure_col(table, col, ddl):
+        rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+        cols = {r[1].lower() for r in rows}  # r[1] = nome da coluna
+        if col.lower() not in cols:
+            con.execute(ddl)
+
+    _ensure_col("trackers", "client_id", "ALTER TABLE trackers ADD COLUMN client_id INTEGER;")
+    _ensure_col("trackers", "tracker_id", "ALTER TABLE trackers ADD COLUMN tracker_id TEXT;")
+    _ensure_col("trackers", "secret_token", "ALTER TABLE trackers ADD COLUMN secret_token TEXT;")
+    _ensure_col("trackers", "status", "ALTER TABLE trackers ADD COLUMN status TEXT DEFAULT 'active';")
+    _ensure_col("trackers", "vendor", "ALTER TABLE trackers ADD COLUMN vendor TEXT;")
+
+    con.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_trackers_imei
+            ON trackers(imei);
+        """)
+
+    # Índices úteis (os seus já existentes)
     con.execute("CREATE INDEX IF NOT EXISTS idx_tel_client_ts ON telemetry(client_id, timestamp);")
     con.execute("CREATE INDEX IF NOT EXISTS idx_tel_client_vid_ts ON telemetry(client_id, vehicle_id, timestamp);")
     con.execute("CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id);")
@@ -240,19 +261,38 @@ def delete_vehicle(client_id: int, vehicle_id: str):
 
 def list_vehicles(client_id: int, q: Optional[str]=None, only: Optional[str]=None):
     con = get_conn()
-    base = "SELECT * FROM vehicles WHERE client_id=?"
+    base = """
+      SELECT
+        v.*,
+        t.imei   AS imei,
+        t.vendor AS vendor
+      FROM vehicles v
+      LEFT JOIN trackers t
+        ON t.client_id = v.client_id
+       AND t.vehicle_id = v.id
+      WHERE v.client_id = ?
+    """
     args = [client_id]
     if q:
-        base += " AND (lower(name) LIKE ? OR lower(plate) LIKE ? OR lower(id) LIKE ? OR lower(driver) LIKE ? OR (tags IS NOT NULL AND lower(tags) LIKE ?))"
+        base += """
+          AND (
+            lower(v.name)  LIKE ?
+            OR lower(v.plate) LIKE ?
+            OR lower(v.id)    LIKE ?
+            OR lower(v.driver) LIKE ?
+            OR (v.tags IS NOT NULL AND lower(v.tags) LIKE ?)
+          )
+        """
         qlike = f"%{q.lower()}%"
         args += [qlike, qlike, qlike, qlike, qlike]
     if only in ("online","offline","maintenance"):
-        base += " AND status=?"
+        base += " AND v.status = ?"
         args += [only]
-    base += " ORDER BY id"
+    base += " ORDER BY v.id"
     rows = con.execute(base, args).fetchall()
     con.close()
     return rows
+
 
 def get_vehicle(client_id: int, vehicle_id: str):
     con = get_conn()
@@ -543,3 +583,4 @@ def contact_save(name: str, email: str, company: str, message: str):
     """, [cid, name, email, company, message, now])
     con.close()
     return cid
+
