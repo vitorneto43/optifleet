@@ -51,7 +51,7 @@ from routes.account_routes import bp_account
 # Disponibiliza user/sub/trial globalmente nos templates (Jinja)
 from core.db import get_active_subscription, get_active_trial, create_trial
 from core.db import get_conn  # use o do core/db.py
-
+from core.db_connection import close_db
 
 # ===== Export helpers =====
 from io import StringIO, BytesIO
@@ -164,7 +164,9 @@ login_manager = LoginManager()
 login_manager.login_view = "auth.login_page"
 login_manager.init_app(app)
 
-
+@app.teardown_appcontext
+def teardown_db(exception):
+    close_db()
 
 @login_manager.user_loader
 def load_user(user_id: str):
