@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import duckdb
 import secrets
 import os
+from core.db_connection import get_db  # ou o que você usa para abrir a conexão
 
 # =========================
 # Config / Conexão
@@ -532,6 +533,20 @@ def get_subscription_by_provider_ref(provider_ref: str):
     """, [provider_ref]).fetchone()
     con.close()
     return row
+
+def get_latest_subscription_for_user(user_id: int):
+    """Retorna a assinatura mais recente do usuário."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT *
+        FROM subscriptions
+        WHERE user_id = ?
+        ORDER BY started_at DESC
+        LIMIT 1
+    """, (user_id,))
+    row = cur.fetchone()
+    return dict(row) if row else None
 
 # =========================
 # Trials

@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import date, timedelta, datetime, timezone
 from core.db import create_subscription, mark_subscription_status
 import unicodedata
+
 # -------------------------------------------------------------------
 # Blueprint
 # -------------------------------------------------------------------
@@ -18,6 +19,8 @@ CYCLE_ALIASES = {
     "WEEKLY":  {"weekly", "semanal", "w"},
     "YEARLY":  {"yearly", "anual", "y", "annual"},
 }
+
+ANNUAL_DISCOUNT = 0.15  # 15% OFF para todos os planos no anual
 
 def _env() -> str:
     """production (default) | sandbox"""
@@ -61,23 +64,20 @@ PLAN_ALIASES = {
     "enterprise": {"enterprise", "empresarial", "empresa", "corp", "corporate"},
 }
 
-
 def _norm_plan_name(name: str | None) -> str:
     n = _strip_accents((name or "").strip().lower())
     for canonical, aliases in PLAN_ALIASES.items():
         if n in {_strip_accents(x) for x in aliases}:
             return canonical
-    # se vier vazio, mantenha o que está na tela (preferimos 'start' ao invés de forçar 'pro')
     return "start" if not n else ("pro" if n not in ("start","pro","enterprise") else n)
 
 def price_for(plan_name_or_dict, billing: str, vehicles: int | None = None) -> float:
     """
-    start = 399/mês
-    pro   = 1499/mês
-    enterprise = 2200/mês
-    anual = 15% OFF no total anual (12 * mensal * 0.85)
+    start      = 399/mês
+    pro        = 1499/mês
+    enterprise = 2200/mês   ← o que você quer
+    anual      = 15% OFF no total anual
     """
-    # 1) valor explícito em dict tem prioridade
     if isinstance(plan_name_or_dict, dict):
         v_exp = parse_money(plan_name_or_dict.get("valor"))
         if v_exp > 0:
@@ -86,17 +86,21 @@ def price_for(plan_name_or_dict, billing: str, vehicles: int | None = None) -> f
     else:
         plan_name = _norm_plan_name(str(plan_name_or_dict))
 
-    MONTHLY = {"start": 399.00, "pro": 1499.00, "enterprise": 2200.00}
+    MONTHLY = {
+        "start": 399.00,
+        "pro": 1499.00,
+        "enterprise": 2200.00,  # ← AQUI 2200
+    }
+
     base = MONTHLY.get(plan_name, 1499.00)
 
     bill = _strip_accents((billing or "monthly").strip().lower())
     if bill in {"annual", "anual", "yearly"}:
-        return round(base * 12 * 0.85, 2)  # total anual com 15% OFF
+        return round(base * 12 * 0.85, 2)  # 15% OFF no ano
     return float(base)
 
 def _price(plan, billing, vehicles: int | None = None) -> float:
     return price_for(plan, billing, vehicles)
-
 
 def _asaas_cycle(billing: str) -> str:
     return "YEARLY" if (billing or "").lower() == "annual" else "MONTHLY"
@@ -110,7 +114,7 @@ def parse_money(v) -> float:
     if isinstance(v, (int, float)):
         return float(v)
     s = str(v).strip()
-    s = re.sub(r'[^\d,.-]', '', s)  # mantém dígitos/ , . e sinal
+    s = re.sub(r'[^\d,.-]', '', s)
     if ',' in s and '.' not in s:
         s = s.replace('.', '').replace(',', '.')
     try:
@@ -119,13 +123,6 @@ def parse_money(v) -> float:
         return 0.0
 
 def _normalize_plan(plano, veiculos=None) -> dict:
-    """
-    plano pode ser:
-      - dict: {"nome": "pro", "valor": 1499.0}
-      - str JSON: '{"nome":"start","valor":"399,00"}'
-      - str: "start" | "pro" | "enterprise"
-    Retorna {"nome": str, "valor": float} (valor só se explícito).
-    """
     if isinstance(plano, str):
         s = plano.strip()
         try:
@@ -140,25 +137,28 @@ def _normalize_plan(plano, veiculos=None) -> dict:
     valor = parse_money(plano.get("valor"))
     return {"nome": nome, "valor": float(valor) if valor > 0 else 0.0}
 
-
 def _normalize_billing(faturamento) -> dict:
     """
     Aceita:
       - dict: {"ciclo": "MONTHLY", "dia_venc": 10, "billingType": "BOLETO"}
-      - str:  "MONTHLY", "mensal", "weekly", "anual", etc.
+      - str:  "MONTHLY", "mensal", "weekly", "anual", "annual", etc.
       - str JSON: '{"ciclo":"MONTHLY","dia_venc":10,"billingType":"BOLETO"}'
     Retorna {"ciclo","billingType","nextDueDate"} normalizados.
     """
     if isinstance(faturamento, str):
         fat_str = faturamento.strip()
+        # tenta JSON primeiro
         try:
             faturamento = json.loads(fat_str)
         except Exception:
-            up = fat_str.upper()
+            # 🔥 AQUI ESTAVA O PROBLEMA
+            # vamos comparar tudo em minúsculo
+            low = fat_str.lower()
             ciclo = None
             for k, aliases in CYCLE_ALIASES.items():
-                if up in aliases or up == k:
-                    ciclo = k
+                # k = "MONTHLY" / "YEARLY" ... então compara em lower tb
+                if low in {a.lower() for a in aliases} or low == k.lower():
+                    ciclo = k  # mantém o nome oficial em maiúsculo
                     break
             if not ciclo:
                 ciclo = "MONTHLY"
@@ -173,8 +173,9 @@ def _normalize_billing(faturamento) -> dict:
 
     billing_type = (faturamento.get("billingType") or "BOLETO").upper()
     if billing_type not in {"BOLETO", "CREDIT_CARD"}:
-        billing_type = "BOLETO"  # assinatura com PIX normalmente não é suportada
+        billing_type = "BOLETO"
 
+    # vencimento
     dia_venc = faturamento.get("dia_venc")
     today = date.today()
     if isinstance(dia_venc, int) and 1 <= dia_venc <= 28 and ciclo in {"MONTHLY", "YEARLY"}:
@@ -201,21 +202,18 @@ def _create_or_get_customer(name, email, cpfCnpj, phone=None) -> dict:
     BASE = _base()
     H = _headers()
 
-    # 1) tenta localizar por e-mail
     q = requests.get(f"{BASE}/customers", headers=H, params={"email": email}, timeout=15)
     q.raise_for_status()
     items = q.json().get("data", []) if q.headers.get("content-type","").startswith("application/json") else []
     if items:
         cust = items[0]
         cid = cust["id"]
-        # 2) garante cpfCnpj
         if not cust.get("cpfCnpj") and cpfCnpj:
             up = requests.put(f"{BASE}/customers/{cid}", headers=H, json={"cpfCnpj": cpfCnpj}, timeout=15)
             up.raise_for_status()
             cust = up.json()
         return cust
 
-    # 3) cria com cpfCnpj
     payload = {"name": name, "email": email, "cpfCnpj": cpfCnpj}
     if phone:
         payload["mobilePhone"] = phone
@@ -223,19 +221,18 @@ def _create_or_get_customer(name, email, cpfCnpj, phone=None) -> dict:
     r.raise_for_status()
     return r.json()
 
-def build_subscription_payload(customer_id, plano, faturamento, veiculos, credit_card_token=None) -> dict:
+def build_subscription_payload(customer_id, plano, faturamento, veiculos, user_id=None, credit_card_token=None) -> dict:
     plan = _normalize_plan(plano, veiculos=veiculos)
     bill = _normalize_billing(faturamento)
 
-    # mapeia ciclo -> texto p/ preço
-    cycle = bill["ciclo"]  # MONTHLY | WEEKLY | YEARLY
+    cycle = bill["ciclo"]
     billing_txt = "annual" if cycle == "YEARLY" else "monthly"
 
     value = price_for(plan, billing_txt, veiculos)
     if value <= 0.0:
         raise ValueError("Valor do plano não definido (> 0). Informe 'valor' ou ajuste as regras.")
 
-    desc_nome = plan["nome"]                   # 'start' | 'pro' | 'enterprise'
+    desc_nome = plan["nome"]
     desc_veic = f"{veiculos} veículos" if veiculos not in (None, "") else ""
     desc_ciclo = "anual" if billing_txt == "annual" else "mensal"
     desc = " | ".join(x for x in (desc_nome, desc_ciclo, desc_veic) if x)
@@ -243,10 +240,10 @@ def build_subscription_payload(customer_id, plano, faturamento, veiculos, credit
     payload = {
         "customer": customer_id,
         "value": value,
-        "cycle": bill["ciclo"],                 # MONTHLY|WEEKLY|YEARLY
-        "billingType": bill["billingType"],     # BOLETO|CREDIT_CARD
-        "nextDueDate": bill["nextDueDate"],     # YYYY-MM-DD
-        "description": desc,                    # mensagem correta ao Asaas
+        "cycle": bill["ciclo"],
+        "billingType": bill["billingType"],
+        "nextDueDate": bill["nextDueDate"],
+        "description": desc,
     }
 
     if payload["billingType"] == "CREDIT_CARD":
@@ -262,13 +259,10 @@ def build_subscription_payload(customer_id, plano, faturamento, veiculos, credit
 
     return payload
 
-
-
-
 def _create_subscription(customer_id, plano, faturamento, veiculos, user_id) -> dict:
     BASE = _base()
     H = _headers()
-    payload = build_subscription_payload(customer_id, plano, faturamento, veiculos)
+    payload = build_subscription_payload(customer_id, plano, faturamento, veiculos, user_id=user_id)
     r = requests.post(f"{BASE}/subscriptions", headers=H, json=payload, timeout=20)
 
     if r.status_code >= 400:
@@ -279,10 +273,9 @@ def _create_subscription(customer_id, plano, faturamento, veiculos, user_id) -> 
         print("[ASAAS][SUB] PAYLOAD_ENVIADO:", payload)
         print("[ASAAS][SUB] ERRO:", r.status_code, err)
         r.raise_for_status()
-    return r.json()  # sempre dict
+    return r.json()
 
 def _ensure_first_payment(subscription_id: str, value: float, prefer: str = "UNDEFINED") -> dict:
-    """Cria a 1ª cobrança da assinatura (UNDEFINED | PIX | BOLETO | CREDIT_CARD)."""
     payload = {
         "value": value,
         "dueDate": _today_iso(),
@@ -354,32 +347,38 @@ def _create_oneoff_payment(customer_id: str, value: float, desc: str) -> dict:
 # -------------------------------------------------------------------
 # Rotas de UI (checkout + start via formulário)
 # -------------------------------------------------------------------
+# -------------------------------
+# ASAAS CHECKOUT (GET)
+# -------------------------------
 @bp_asaas.get("/checkout")
 @login_required
 def checkout():
     raw_plan = request.args.get("plan") or request.form.get("plan") or "start"
-    p = (raw_plan or "").strip().lower()
-
-    # aliases → canônicos
-    aliases = {
-        "start": {"start","starter","route","rota","routing","inicial","basic","essentials"},
-        "pro": {"pro","pró","professional","profissional"},
-        "enterprise": {"enterprise","empresarial","empresa","corp","corporate"},
-    }
-    plan = "start"  # default seguro
-    for canon, names in aliases.items():
-        if p in {n.lower() for n in names}:
-            plan = canon
-            break
+    plan = _norm_plan_name(raw_plan)
 
     billing = (request.args.get("billing") or request.form.get("billing") or "monthly").strip().lower()
-    billing = billing.replace("á","a").replace("ã","a")  # anual/anual → annual
-    vehicles = int(request.args.get("vehicles") or request.form.get("vehicles") or 5)
+    billing = billing.replace("á", "a").replace("ã", "a")  # anual/anual -> annual
 
+    v_str = request.args.get("vehicles") or request.form.get("vehicles") or "1"
+    try:
+        vehicles = int(v_str)
+    except ValueError:
+        vehicles = 1
+
+    # 🔒 trava por plano
+    if plan == "start":
+        vehicles = min(max(1, vehicles), 5)
+    elif plan == "pro":
+        vehicles = min(max(1, vehicles), 50)
+    else:  # enterprise
+        vehicles = min(max(51, vehicles), 9_999_999)
+
+    # 🔁 usa o mesmo motor de preço
     price = _price(plan, billing, vehicles)
-    plan_label = {"start":"Start","pro":"Pro","enterprise":"Enterprise"}[plan]
-    billing_label = "Anual (15% OFF)" if billing in {"annual","anual","yearly"} else "Mensal"
-    monthly_equiv = round(price/12,2) if billing in {"annual","anual","yearly"} else None
+
+    plan_label = {"start": "Start", "pro": "Pro", "enterprise": "Enterprise"}[plan]
+    billing_label = "Anual (15% OFF)" if billing in {"annual", "anual", "yearly"} else "Mensal"
+    monthly_equiv = round(price / 12, 2) if billing in {"annual", "anual", "yearly"} else None
 
     return render_template(
         "checkout.html",
@@ -394,15 +393,41 @@ def checkout():
 
 
 
-
+# -------------------------------
+# ASAAS START (POST)
+# -------------------------------
 @bp_asaas.post("/start")
 @login_required
 def start_subscription_form():
+    # ---------- 1. plano ----------
     raw_plan = request.form.get("plan") or request.args.get("plan") or "start"
     plan = _norm_plan_name(raw_plan)
-    billing = _strip_accents((request.form.get("billing") or request.args.get("billing") or "monthly").lower())
-    vehicles = int(request.form.get("vehicles") or request.args.get("vehicles") or 5)
 
+    # ---------- 2. billing ----------
+    billing_raw = (request.form.get("billing") or request.args.get("billing") or "monthly").lower()
+    billing_raw = billing_raw.replace("á", "a").replace("ã", "a")
+
+    # vamos normalizar AQUI usando a função boa
+    billing_norm = _normalize_billing(billing_raw)  # -> {"ciclo": "...", "billingType": "...", "nextDueDate": "..."}
+
+    # isso aqui é o que o nosso pricing usa para calcular
+    billing_txt = "annual" if billing_norm["ciclo"] == "YEARLY" else "monthly"
+
+    # ---------- 3. veículos ----------
+    v_str = request.form.get("vehicles") or request.args.get("vehicles") or "1"
+    try:
+        vehicles = int(v_str)
+    except ValueError:
+        vehicles = 1
+
+    if plan == "start":
+        vehicles = min(max(1, vehicles), 5)
+    elif plan == "pro":
+        vehicles = min(max(1, vehicles), 50)
+    else:  # enterprise
+        vehicles = min(max(51, vehicles), 9_999_999)
+
+    # ---------- 4. dados do cliente ----------
     name = request.form.get("name") or current_user.email.split("@")[0]
     email = request.form.get("email") or current_user.email
     cpfCnpj = request.form.get("cpfCnpj") or None
@@ -410,16 +435,26 @@ def start_subscription_form():
 
     if not _has_api_key():
         flash("Configuração do Asaas ausente (ASAAS_API_KEY).", "error")
-        return redirect(url_for("asaas.checkout", plan=plan, billing=billing, vehicles=vehicles))
+        return redirect(url_for("asaas.checkout", plan=plan, billing=billing_txt, vehicles=vehicles))
 
+    # ---------- 5. cliente no Asaas ----------
     try:
         cust = _create_or_get_customer(name=name, email=email, cpfCnpj=cpfCnpj, phone=phone)
     except requests.HTTPError:
         flash("Falha ao criar/atualizar cliente no Asaas.", "error")
-        return redirect(url_for("asaas.checkout", plan=plan, billing=billing, vehicles=vehicles))
+        return redirect(url_for("asaas.checkout", plan=plan, billing=billing_txt, vehicles=vehicles))
 
+    # ---------- 6. assinatura no Asaas ----------
     try:
-        sub = _create_subscription(cust["id"], plan, billing, vehicles, int(current_user.id))
+        # 👉 AQUI é o pulo do gato:
+        # passamos o billing JÁ NORMALIZADO, e não só a string "annual"
+        sub = _create_subscription(
+            customer_id=cust["id"],
+            plano=plan,
+            faturamento=billing_norm,
+            veiculos=vehicles,
+            user_id=int(current_user.id),
+        )
     except requests.HTTPError as e:
         try:
             err = e.response.json()
@@ -427,28 +462,28 @@ def start_subscription_form():
             err = {"raw": getattr(e.response, "text", "")[:300]}
         print("[ASAAS][SUB] ERRO AO CRIAR ASSINATURA:", err)
         flash("Falha ao criar assinatura no Asaas. Verifique os dados e tente novamente.", "error")
-        return redirect(url_for("asaas.checkout", plan=plan, billing=billing, vehicles=vehicles))
+        return redirect(url_for("asaas.checkout", plan=plan, billing=billing_txt, vehicles=vehicles))
 
+    # ---------- 7. grava local ----------
     provider_ref = sub.get("id") or sub.get("subscription") or ""
-
     started_at = datetime.now(timezone.utc)
-    period_end = started_at + (timedelta(days=365) if billing in {"annual","anual","yearly"} else timedelta(days=31))
-    try:
-        create_subscription(
-            user_id=int(current_user.id),
-            plan=plan,
-            billing=billing,
-            vehicles=vehicles,
-            status="pending",
-            provider="asaas",
-            provider_ref=provider_ref or "unknown",
-            started_at=started_at,
-            current_period_end=period_end
-        )
-    except Exception as e:
-        print("[ASAAS] WARN local save:", e)
+    period_end = started_at + (
+        timedelta(days=365) if billing_norm["ciclo"] == "YEARLY" else timedelta(days=31)
+    )
 
-    # tenta link direto / já criado pelo Asaas
+    create_subscription(
+        user_id=int(current_user.id),
+        plan=plan,
+        billing=billing_txt,  # salva "monthly" / "annual" no seu banco
+        vehicles=vehicles,
+        status="pending",
+        provider="asaas",
+        provider_ref=provider_ref or "unknown",
+        started_at=started_at,
+        current_period_end=period_end,
+    )
+
+    # ---------- 8. redireciona pro boleto/pagamento ----------
     url = _extract_checkout_url(sub) or _find_payment_url(sub) or _get_latest_payment_url(provider_ref)
     if url:
         return redirect(url)
@@ -457,58 +492,6 @@ def start_subscription_form():
     return redirect(url_for("account.account_home"))
 
 
-# -------------------------------------------------------------------
-# Rota JSON (opcional) para iniciar assinatura via API
-# -------------------------------------------------------------------
-@bp_asaas.post("/start_json")
-def start_subscription_json():
-    """
-    Espera JSON:
-    {
-      "customer": {"name": "...", "email": "...", "cpfCnpj": "...", "phone": "..."},
-      "plan": {"nome":"pro","valor":"1499,00"}  # ou "pro" (fallback ativa)
-      "billing": {"ciclo":"MONTHLY","billingType":"BOLETO","dia_venc":10}  # pode ser "mensal", "MONTHLY", etc.
-      "vehicles": 20
-    }
-    """
-    data = request.get_json(force=True, silent=True) or {}
-    cust_in = (data.get("customer") or {})
-    name     = cust_in.get("name")  or ""
-    email    = cust_in.get("email") or ""
-    cpfCnpj  = cust_in.get("cpfCnpj") or ""
-    phone    = cust_in.get("phone")
-
-    if not (name and email and cpfCnpj):
-        return jsonify({"ok": False, "error": "Informe name, email e cpfCnpj em customer."}), 400
-
-    try:
-        cust = _create_or_get_customer(name=name, email=email, cpfCnpj=cpfCnpj, phone=phone)
-    except requests.HTTPError as e:
-        resp = getattr(e, "response", None)
-        body = {}
-        if resp is not None:
-            try: body = resp.json()
-            except Exception: body = {"raw": resp.text}
-        return jsonify({"ok": False, "stage": "customer", "error": body}), 400
-
-    plan     = data.get("plan")     or "pro"       # aceita string ou dict
-    billing  = data.get("billing")  or "MONTHLY"   # aceita string ou dict
-    vehicles = data.get("vehicles") or 0
-
-    try:
-        sub = _create_subscription(cust["id"], plan, billing, vehicles, user_id=0)
-    except requests.HTTPError as e:
-        resp = getattr(e, "response", None)
-        body = {}
-        if resp is not None:
-            try: body = resp.json()
-            except Exception: body = {"raw": resp.text}
-        return jsonify({"ok": False, "stage": "subscription", "error": body}), 400
-    except ValueError as e:
-        return jsonify({"ok": False, "stage": "payload", "error": str(e)}), 400
-
-    provider_ref = sub.get("id") or sub.get("subscription") or ""
-    return jsonify({"ok": True, "subscription": sub, "provider_ref": provider_ref}), 200
 
 # -------------------------------------------------------------------
 # Webhook Asaas
