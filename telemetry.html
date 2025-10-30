@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>OptiFleet — Telemetria</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+<style>
+  :root{--bg:#0b132b;--card:#1c2541;--muted:#a0aec0}
+  body{margin:0;font-family:system-ui,Arial;background:var(--bg);color:#fff}
+  .wrap{max-width:1200px;margin:18px auto;padding:0 14px}
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:14px}
+  .card{background:var(--card);border-radius:12px;padding:12px}
+  #map{height:68vh;border-radius:10px}
+  ul{list-style:none;padding:0;margin:0}
+  li{padding:8px;border-bottom:1px solid rgba(255,255,255,.1);cursor:pointer}
+  li:hover{background:rgba(255,255,255,.05)}
+  .muted{color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Telemetria em tempo real</h1>
+  <div class="grid">
+    <div class="card">
+      <div id="map"></div>
+      <div id="hint" class="muted" style="margin-top:6px">Clique em um veículo para ver o traçado recente.</div>
+    </div>
+    <div class="card">
+      <h3>Veículos</h3>
+      <ul id="veh_list"></ul>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+const map = L.map('map').setView([-15.78,-47.93], 4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(map);
+
+const markers = {};      // vehicle_id -> L.Marker
+let trackLayer = null;   // polyline do traçado
+
+async function loadLatest(){
+  const r = await fetch('/api/telemetry/latest');
+  const data = await r.json();
+  const list = document.getElementById('veh_list');
+  list.innerHTML = '';
+  let bounds = [];
+  data.forEach(d=>{
+    const vid = d.vehicle_id;
+    // lista
+    const li = document.createElement('li');
+    li.textContent = `Veículo ${vid} — ${d.speed_kmh.toFixed(0)} km/h`;
+    li.onclick = ()=>showTrack(vid);
+    list.appendChild(li);
+
+    // marcador
+    if(!markers[vid]){
+      markers[vid] = L.marker([d.lat, d.lon]).addTo(map).bindPopup(`Veículo ${vid}`);
+    }else{
+      markers[vid].setLatLng([d.lat, d.lon]);
+    }
+    bounds.push([d.lat, d.lon]);
+  });
+  if(bounds.length){ map.fitBounds(bounds, {padding:[30,30]}); }
+}
+
+// Traçado simples (últimos pontos)
+async function showTrack(vehicleId){
+  const r = await fetch(`/api/telemetry/${vehicleId}`);
+  const data = await r.json();
+  if(trackLayer){ map.removeLayer(trackLayer); trackLayer = null; }
+  if(!data.length) return;
+  const latlngs = data.map(p=>[p.lat, p.lon]).reverse();
+  trackLayer = L.polyline(latlngs).addTo(map);
+  map.fitBounds(trackLayer.getBounds(), {padding:[30,30]});
+}
+
+// SSE: atualiza em tempo real
+const sse = new EventSource('/api/telemetry/stream');
+sse.onmessage = (ev) => {
+  try{
+    const fix = JSON.parse(ev.data);
+    const vid = fix.vehicle_id;
+    if(!markers[vid]){
+      markers[vid] = L.marker([fix.lat, fix.lon]).addTo(map).bindPopup(`Veículo ${vid}`);
+    }else{
+      markers[vid].setLatLng([fix.lat, fix.lon]);
+    }
+  }catch(e){}
+};
+
+// inicial
+loadLatest();
+</script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Contato — OptiFleet</title>
+  <link rel="stylesheet" href="/static/css/site.css">
+</head>
+<body>
+  <!-- Header público (igual ao da landing) -->
+  <header class="nav">
+    <div class="nav__wrap">
+      <a href="/site" class="brand">
+        <img src="/static/img/logo (2).png" alt="OptiFleet" class="brand__logo">
+        <span class="brand__name">OptiFleet</span>
+      </a>
+      <nav class="nav__links">
+        <a href="/site#beneficios">Benefícios</a>
+        <a href="/site#como-funciona">Como funciona</a>
+        <a href="/site#precos">Preços</a>
+        <a href="/terms">Termos</a>
+        <a href="/privacy">Privacidade</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Conteúdo -->
+  <section class="section__head"><h2>Fale com vendas</h2></section>
+
+  <section style="max-width:720px;margin:0 auto;padding:0 20px 40px">
+    <p class="muted" style="margin-bottom:18px">
+      Preencha o formulário e retornaremos em breve.
+    </p>
+
+    <!-- IMPORTANTE: action aponta para o endpoint POST correto -->
+    <form method="post" action="{{ url_for('contact_submit') }}" class="contact__form" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:grid;gap:12px;grid-template-columns:1fr">
+        <div>
+          <label for="name" style="display:block;margin-bottom:6px;font-weight:600">Nome</label>
+          <input id="name" name="name" required placeholder="Seu nome completo">
+        </div>
+        <div>
+          <label for="email" style="display:block;margin-bottom:6px;font-weight:600">E-mail</label>
+          <input id="email" name="email" type="email" required placeholder="seuemail@exemplo.com">
+        </div>
+      </div>
+
+      <div style="display:grid;gap:12px;grid-template-columns:1fr">
+        <div>
+          <label for="company" style="display:block;margin-bottom:6px;font-weight:600">Empresa</label>
+          <input id="company" name="company" placeholder="Nome da empresa (opcional)">
+        </div>
+        <div>
+          <label for="phone" style="display:block;margin-bottom:6px;font-weight:600">Telefone</label>
+          <input id="phone" name="phone" placeholder="(xx) xxxxx-xxxx (opcional)">
+        </div>
+      </div>
+
+      <div>
+        <label for="message" style="display:block;margin-bottom:6px;font-weight:600">Mensagem</label>
+        <textarea id="message" name="message" rows="5" required placeholder="Conte-nos em poucas linhas o contexto e objetivo."></textarea>
+      </div>
+
+      <button type="submit" class="btn">Enviar</button>
+    </form>
+  </section>
+
+  <!-- Footer público -->
+  <footer class="footer">
+    <div class="footer__wrap">
+      <div class="col">
+        <div class="brand brand--footer">
+          <img src="/static/img/logo (2).png" alt="OptiFleet" class="brand__logo">
+          <span class="brand__name">OptiFleet</span>
+        </div>
+        <p class="muted">Rotas com IA, rastreamento ao vivo e telemetria inteligente para operações enxutas e eficientes.</p>
+      </div>
+      <div class="col">
+        <h5>Produto</h5>
+        <a href="/site#beneficios">Benefícios</a>
+        <a href="/site#como-funciona">Como funciona</a>
+        <a href="/site#precos">Preços</a>
+        <a href="/app">Demo</a>
+      </div>
+      <div class="col">
+        <h5>Empresa</h5>
+        <a href="/contact">Contato</a>
+        <a href="/terms">Termos</a>
+        <a href="/privacy">Privacidade</a>
+      </div>
+    </div>
+    <div class="footer__copy">© <span id="y"></span> OptiFleet. Todos os direitos reservados.</div>
+  </footer>
+
+  <script>
+    // mobile nav
+    const burger = document.getElementById('burger');
+    const links = document.querySelector('.nav__links');
+    burger?.addEventListener('click', ()=> links.classList.toggle('is-open'));
+
+    // year
+    document.getElementById('y').textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>

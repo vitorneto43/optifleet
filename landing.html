@@ -147,22 +147,20 @@
       <p>Comece pequeno, cresça sem sustos.</p>
     </div>
 
-    <div class="pricing__toggle">
+    <!--<div class="pricing__toggle">
       <span>Mensal</span>
       <label class="switch">
         <input type="checkbox" id="toggleAnnual">
         <span class="slider"></span>
       </label>
       <span>Anual <b class="save">-15%</b></span>
-    </div>
-
+    </div>-->
     <div class="plans">
-      <!-- START (route) -->
+      <!-- START -->
       <div class="plan">
         <h3>Start</h3>
         <div class="price">
           <span class="p p-m">R$ 399</span>
-          <span class="p p-a">R$ 339,15</span>
           <small>/mês</small>
         </div>
         <p class="muted">Para operações iniciando com otimização e rastreamento.</p>
@@ -173,19 +171,23 @@
           <li>Suporte por e-mail</li>
         </ul>
         <div class="qty">
-          <label for="vRoute" class="muted">Veículos</label>
-          <input id="vRoute" type="number" min="1" max="5" value="5">
+          <label for="v-start" class="muted">Veículos</label>
+          <input id="v-start" type="number" min="1" max="5" value="5">
         </div>
-        <a id="btnStart" class="btn btn--full" href="/billing/go?plan=route&billing=monthly&vehicles=5" data-plan="route">Assinar Start</a>
+        <a id="btn-start"
+           class="btn btn--full"
+           href="/billing/go?plan=start&billing=monthly&vehicles=5"
+           data-plan="start">
+          Assinar Start
+        </a>
       </div>
 
-      <!-- PRO (full) -->
+      <!-- PRO -->
       <div class="plan plan--focus">
         <div class="pill">Mais popular</div>
         <h3>Pro</h3>
         <div class="price">
           <span class="p p-m">R$ 1499</span>
-          <span class="p p-a">R$ 1274,15</span>
           <small>/mês</small>
         </div>
         <p class="muted">Frotas médias com telemetria e manutenção preditiva.</p>
@@ -196,24 +198,42 @@
           <li>Alertas e relatórios</li>
         </ul>
         <div class="qty">
-          <label for="vFull" class="muted">Veículos</label>
-          <input id="vFull" type="number" min="6" max="50" value="20">
+          <label for="v-pro" class="muted">Veículos</label>
+          <input id="v-pro" type="number" min="1" max="50" value="20">
         </div>
-        <a id="btnPro" class="btn btn--full" href="/billing/go?plan=full&billing=monthly&vehicles=20" data-plan="full">Assinar Pro</a>
+        <a id="btn-pro"
+           class="btn btn--full"
+           href="/billing/go?plan=pro&billing=monthly&vehicles=20"
+           data-plan="pro">
+          Assinar Pro
+        </a>
       </div>
 
       <!-- ENTERPRISE -->
       <div class="plan">
         <h3>Enterprise</h3>
-        <div class="price"><span class="p">Sob consulta</span></div>
+        <div class="price">
+          <span class="p p-m">R$ 2200</span>
+          <small>/mês</small>
+        </div>
         <p class="muted">Grandes operações: integrações, SLAs e customizações.</p>
         <ul>
-          <li>Veículos ilimitados</li>
+          <li>51+ veículos</li>
           <li>Integrações dedicadas</li>
           <li>Dashboards executivos</li>
           <li>Suporte prioritário</li>
         </ul>
-        <a class="btn btn--full btn--ghost" href="/contact">Falar com vendas</a>
+        <div class="qty">
+          <label for="v-enterprise" class="muted">Veículos</label>
+          <!-- AQUI: sem max -->
+          <input id="v-enterprise" type="number" min="51" value="70">
+        </div>
+        <a id="btn-enterprise"
+           class="btn btn--full"
+           href="/billing/go?plan=enterprise&billing=monthly&vehicles=70"
+           data-plan="enterprise">
+          Assinar Enterprise
+        </a>
       </div>
     </div>
   </section>
@@ -266,43 +286,53 @@
   </footer>
 
   <script>
-    // mobile nav
-    const burger = document.getElementById('burger');
-    const links = document.querySelector('.nav__links');
-    burger?.addEventListener('click', ()=> links.classList.toggle('is-open'));
+  // pega os inputs
+  const vStart       = document.getElementById('v-start');
+  const vPro         = document.getElementById('v-pro');
+  const vEnterprise  = document.getElementById('v-enterprise');
 
-    // pricing toggle + montar links de assinatura (SEM duplicação)
-    const toggle = document.getElementById('toggleAnnual');
-    const pricesM = document.querySelectorAll('.p-m');
-    const pricesA = document.querySelectorAll('.p-a');
-    const btnStart = document.getElementById('btnStart');
-    const btnPro   = document.getElementById('btnPro');
-    const vRoute   = document.getElementById('vRoute');
-    const vFull    = document.getElementById('vFull');
+  // pega os botões
+  const btnStart      = document.getElementById('btn-start');
+  const btnPro        = document.getElementById('btn-pro');
+  const btnEnterprise = document.getElementById('btn-enterprise');
 
-    function currentBilling(){ return toggle?.checked ? 'annual' : 'monthly'; }
-    function setPriceMode(annual){
-      pricesM.forEach(el=> el.style.display = annual ? 'none':'inline');
-      pricesA.forEach(el=> el.style.display = annual ? 'inline':'none');
-      updateLinks();
+  function buildHref(plan, vehicles) {
+    const v = parseInt(vehicles, 10);
+
+    if (plan === 'start') {
+      const vv = isNaN(v) ? 1 : Math.min(Math.max(v, 1), 5);
+      return `/billing/go?plan=start&billing=monthly&vehicles=${vv}`;
     }
-    function makeHref(plan, vehicles){
-      const billing = currentBilling();
-      const v = Math.max(1, parseInt(vehicles||'1',10));
-      return `/billing/go?plan=${encodeURIComponent(plan)}&billing=${encodeURIComponent(billing)}&vehicles=${v}`;
+    if (plan === 'pro') {
+      const vv = isNaN(v) ? 1 : Math.min(Math.max(v, 1), 50);
+      return `/billing/go?plan=pro&billing=monthly&vehicles=${vv}`;
     }
-    function updateLinks(){
-      if (btnStart) btnStart.href = makeHref('route', vRoute?.value || 5);
-      if (btnPro)   btnPro.href   = makeHref('full',  vFull?.value  || 20);
-    }
+    // ENTERPRISE: deixa passar o que o cara digitou (mínimo 51)
+    const vv = isNaN(v) ? 51 : Math.max(v, 51);
+    return `/billing/go?plan=enterprise&billing=monthly&vehicles=${vv}`;
+  }
 
-    setPriceMode(false);                       // inicia como Mensal
-    toggle?.addEventListener('change', e=> setPriceMode(e.target.checked));
-    vRoute?.addEventListener('input', updateLinks);
-    vFull?.addEventListener('input', updateLinks);
+  function updateStart() {
+    if (!vStart || !btnStart) return;
+    btnStart.href = buildHref('start', vStart.value);
+  }
+  function updatePro() {
+    if (!vPro || !btnPro) return;
+    btnPro.href = buildHref('pro', vPro.value);
+  }
+  function updateEnterprise() {
+    if (!vEnterprise || !btnEnterprise) return;
+    btnEnterprise.href = buildHref('enterprise', vEnterprise.value);
+  }
 
-    // year no rodapé
-    document.getElementById('y').textContent = new Date().getFullYear();
-  </script>
+  vStart?.addEventListener('input', updateStart);
+  vPro?.addEventListener('input', updatePro);
+  vEnterprise?.addEventListener('input', updateEnterprise);
+
+  // seta os 3 uma vez na carga
+  updateStart();
+  updatePro();
+  updateEnterprise();
+</script>
 </body>
 </html>

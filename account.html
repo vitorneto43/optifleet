@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Minha Conta — OptiFleet</title>
+<link rel="stylesheet" href="/static/css/site.css">
+<style>
+  body{background:#0b132b;color:#fff;font-family:system-ui,Arial}
+  .wrap{max-width:900px;margin:24px auto;padding:0 16px}
+  .card{background:#1c2541;border-radius:12px;padding:16px;box-shadow:0 8px 24px rgba(0,0,0,.25);margin-bottom:16px}
+  .row{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+  input,select,button{padding:10px;border-radius:10px;border:0}
+  button{background:#3a86ff;color:#fff;cursor:pointer}
+  .muted{color:#a0aec0}
+  .pill{display:inline-block;padding:4px 8px;border-radius:999px;background:rgba(255,255,255,.1);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Minha Conta</h1>
+
+  <div class="card">
+    <h3>Status</h3>
+    {% if sub %}
+      <p>Assinatura: <span class="pill">{{ sub[1] }}</span> • Cobrança: <span class="pill">{{ sub[2] }}</span> • Veículos: <span class="pill">{{ sub[3] }}</span></p>
+      <p>Situação: <b>{{ sub[4] }}</b> • Vigente até: {{ sub[6] }}</p>
+    {% else %}
+      <p class="muted">Nenhuma assinatura ativa.</p>
+    {% endif %}
+
+    {% if trial %}
+      <p>Trial em andamento — termina em <b>{{ (sub and '—') or '...' }}</b></p>
+    {% endif %}
+  </div>
+
+
+
+  <!-- templates/account.html (trechos alterados) -->
+...
+  <div class="card">
+    <h3>Ativar Plano</h3>
+
+    <!-- Vai direto para a página de pagamento -->
+    <form method="get" action="/billing/go">
+      <div class="row">
+        <div>
+          <label>Plano</label>
+          <select name="plan">
+            <option value="route">Start (Rotas)</option>
+            <option value="pro" selected>Pro (Completo)</option>
+          </select>
+        </div>
+        <div>
+          <label>Cobrança</label>
+          <select name="billing">
+            <option value="monthly" selected>Mensal</option>
+            <option value="annual">Anual (-15%)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Quantidade de veículos</label>
+          <input type="number" name="vehicles" min="1" value="5">
+        </div>
+        <div style="display:flex;align-items:end">
+          <button>Prosseguir para pagamento</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+
+
+    <div>
+      <a href="/" style="color:#9cc1ff">← Voltar ao dashboard</a>
+    </div>
+  </div>
+</body>
+</html>
