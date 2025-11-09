@@ -23,6 +23,8 @@ def get_conn():
 def _init_schema():
     con = get_conn()
 
+   
+
     # Usuários
     con.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -147,6 +149,7 @@ def _init_schema():
                 trial_start     TIMESTAMP NOT NULL,
                 trial_end       TIMESTAMP NOT NULL,
                 status          TEXT DEFAULT 'ativo',   -- 'ativo' | 'expirado' | 'convertido'
+                converted       BOOLEAN DEFAULT FALSE,
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id)
