@@ -109,6 +109,8 @@ def _init_schema():
       PRIMARY KEY (id)
     );
     """)
+    # após criar trial_users:
+    _ensure_col("trial_users", "converted", "ALTER TABLE trial_users ADD COLUMN converted BOOLEAN DEFAULT FALSE;")
 
     # Contatos
     con.execute("""
@@ -716,6 +718,35 @@ def mark_trial_converted_by_user(user_id: int):
          WHERE user_id = ? AND status <> 'convertido'
     """, [user_id])
     con.close()
+def trial_users_backfill_from_trials():
+    """
+    Copia dados da tabela trials -> trial_users (apenas quem ainda não está em trial_users).
+    """
+    with get_conn() as con:
+        # ponto de partida para o id sequencial
+        start_id = con.execute("SELECT COALESCE(MAX(id), 0) FROM trial_users").fetchone()[0] or 0
+        con.execute(f"""
+            INSERT INTO trial_users (id, user_id, email, nome, trial_start, trial_end, status, converted, created_at, updated_at)
+            SELECT
+                {start_id} + ROW_NUMBER() OVER () AS id,
+                t.user_id,
+                COALESCE(u.email, '') AS email,
+                NULL AS nome,
+                t.started_at AS trial_start,
+                t.trial_end  AS trial_end,
+                CASE LOWER(COALESCE(t.status,'')) 
+                    WHEN 'active'    THEN 'ativo'
+                    WHEN 'converted' THEN 'convertido'
+                    ELSE 'expirado'
+                END AS status,
+                CASE LOWER(COALESCE(t.status,'')) WHEN 'converted' THEN TRUE ELSE FALSE END AS converted,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM trials t
+            LEFT JOIN users u ON u.id = t.user_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM trial_users tu WHERE tu.user_id = t.user_id
+            );
+        """)
 
 
 # =========================

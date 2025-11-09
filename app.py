@@ -23,6 +23,7 @@ from core.db import (
     trial_users_summary, list_trial_users
 )
 from core.db import get_active_trial, expire_trial, trial_users_upsert
+from core.db import trial_users_backfill_from_trials
 
 
 
@@ -414,6 +415,15 @@ def admin_trials():
                     f"<td>{ts}</td><td>{te}</td><td>{st}</td><td>{upd}</td></tr>")
     html.append("</table>")
     return "".join(html)
+
+@app.get("/admin/trials/backfill")
+@login_required
+def admin_trials_backfill():
+    # Gate simples para seu usuário (ajuste o ID se precisar):
+    if int(current_user.id) != 1:
+        return "Forbidden", 403
+    trial_users_backfill_from_trials()
+    return redirect(url_for("admin_trials"))
 
 
 # -----------------------------------------------------------------------------
