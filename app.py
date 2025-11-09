@@ -132,22 +132,26 @@ def _to_aware_utc(dt):
 def _days_left(trial):
     if not trial:
         return None
-    # aceita tuple/duckdb.Row ou dict
     end = None
+    # tenta dict
     try:
-        end = trial["trial_end"]  # se vier como dict
+        end = trial.get("trial_end")
     except Exception:
-        try:
-            end = trial[4]         # se vier como tupla: (id, user_id, plan, vehicles, trial_end, status, ...)
-        except Exception:
-            end = None
+        pass
+    # tenta posições comuns (started_at, trial_end, status costuma ser o 6)
+    if end is None:
+        for idx in (5, 4):  # cobre SELECTs diferentes
+            try:
+                end = trial[idx]
+                break
+            except Exception:
+                pass
     end = _to_aware_utc(end)
     if not end:
         return None
     now = datetime.now(timezone.utc)
-    delta = end - now
-    # arredonda por baixo em dias
-    return max(0, int(delta.total_seconds() // 86400))
+    return max(0, int((end - now).total_seconds() // 86400))
+
 
 def _ensure_trial(user_id: int):
     """Cria trial se não houver e AUTO_TRIAL estiver ligado."""
@@ -195,6 +199,30 @@ def _sync_trial_audit_and_expire():
         )
     except Exception as e:
         print("[before_request][trial_audit] erro:", e)
+
+def _trial_status_of(trial):
+    if not trial:
+        return ""
+    # Tenta dict; se for tupla, status costuma ser a última coluna (índice 6)
+    try:
+        return str(trial.get("status", "")).lower()
+    except Exception:
+        try:
+            return str(trial[6]).lower()
+        except Exception:
+            return ""
+
+def _trial_end_of(trial):
+    if not trial:
+        return None
+    try:
+        return trial.get("trial_end")
+    except Exception:
+        try:
+            return trial[5]  # started_at (3), trial_end (4 ou 5 conforme SELECT); ajustamos abaixo no _days_left
+        except Exception:
+            return None
+
 
 # -----------------------------------------------------------------------------
 
@@ -298,8 +326,18 @@ except Exception:
 @app.get("/", endpoint="home")
 def home_public():
     if current_user.is_authenticated:
-        return redirect(url_for("dashboard"))
+        uid = int(current_user.id)
+        sub = get_active_subscription(uid)
+        trial = get_active_trial(uid)
+        sub_ok = bool(sub and str(sub[4]).lower() == "active")  # se seu SELECT de sub mudar, troque esse índice
+        trial_ok = (_trial_status_of(trial) == "active")
+        if sub_ok or trial_ok:
+            return redirect(url_for("dashboard"))
+        # logado mas sem direito -> mostra landing com CTA
+        return render_template("landing.html", paywall_hint=True, days_left=_days_left(trial))
+    # não logado -> landing pública
     return render_template("landing.html")
+
 
 
 # Alias opcional (pode manter /site apontando pra mesma landing)
