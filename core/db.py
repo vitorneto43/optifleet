@@ -23,7 +23,7 @@ def get_conn():
 def _init_schema():
     con = get_conn()
 
-   
+
 
     # Usuários
     con.execute("""

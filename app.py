@@ -329,7 +329,7 @@ def dashboard():
         return render_template("index.html", hide_paywall=True, kpis=kpis)
 
     # sem sub/trial → volta para a landing pública
-    return redirect(url_for("home_public"))
+    return redirect(url_for("home"))
 
 
 
