@@ -551,19 +551,38 @@ def get_subscription_by_provider_ref(provider_ref: str):
     con.close()
     return row
 
+# --- REMOVA esta linha do topo do db.py ---
+# from core.db_connection import get_db
+
+# ... restante do arquivo igual ...
+
 def get_latest_subscription_for_user(user_id: int):
-    from core.db_connection import get_db  # import local evita circular
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        SELECT *
+    """Retorna a assinatura mais recente do usuário (via DuckDB, sem db_connection)."""
+    con = get_conn()
+    row = con.execute("""
+        SELECT id, user_id, plan, billing, vehicles, status,
+               started_at, current_period_end, provider, provider_ref
         FROM subscriptions
         WHERE user_id = ?
         ORDER BY started_at DESC
         LIMIT 1
-    """, (user_id,))
-    row = cur.fetchone()
-    return dict(row) if row else None
+    """, [user_id]).fetchone()
+    con.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "user_id": row[1],
+        "plan": row[2],
+        "billing": row[3],
+        "vehicles": row[4],
+        "status": row[5],
+        "started_at": row[6],
+        "current_period_end": row[7],
+        "provider": row[8],
+        "provider_ref": row[9],
+    }
+
 
 
 
