@@ -22,6 +22,7 @@ from core.db import (
     get_active_subscription, get_active_trial, create_trial,
     trial_users_summary, list_trial_users
 )
+from core.db import get_active_trial, expire_trial, trial_users_upsert
 
 
 
@@ -57,7 +58,7 @@ from routes.account_routes import bp_account
 from core.db import get_active_subscription, get_active_trial, create_trial
 from core.db import get_conn  # use o do core/db.py
 from core.db_connection import close_db
-from core.db import expire_trial  # adicionar import
+
 # ===== Export helpers =====
 from io import StringIO, BytesIO
 import csv
@@ -142,6 +143,35 @@ def _ensure_trial(user_id: int):
     except Exception as e:
         print("[trial] falhou ao criar:", e)
 
+@app.before_request
+def _sync_trial_audit_and_expire():
+    try:
+        uid = int(getattr(current_user, "id", 0) or 0)
+        if not uid:
+            return
+
+        trial = get_active_trial(uid)  # (id, plan, vehicles, started_at, trial_end, status)
+        if not trial:
+            return
+
+        # Expira automaticamente se passou do fim
+        end = _to_aware_utc(trial[4])
+        if end and end < datetime.now(timezone.utc):
+            expire_trial(trial[0])
+            return
+
+        # Garante registro/atualização na auditoria
+        trial_users_upsert(
+            user_id=uid,
+            email=getattr(current_user, "email", "") or "",
+            nome=None,
+            trial_start=trial[3],
+            trial_end=trial[4],
+            converted=False if str(trial[5]).lower() == "active" else (str(trial[5]).lower() == "converted")
+        )
+    except Exception as e:
+        print("[before_request][trial_audit] erro:", e)
+
 # -----------------------------------------------------------------------------
 # App / Config
 # -----------------------------------------------------------------------------
@@ -200,36 +230,6 @@ def inject_globals():
     uid = int(getattr(current_user, "id", 0) or 0)
     sub = get_active_subscription(uid) if uid else None
     trial = get_active_trial(uid) if uid else None
-
-    # >>> registra/atualiza auditoria de trial_users <<<
-    try:
-        if uid and trial:
-            from core.db import trial_users_upsert  # import LOCAL para evitar circular
-            started_at = trial[3]
-            trial_end  = trial[4]
-            trial_users_upsert(
-                user_id=uid,
-                email=getattr(current_user, "email", None) or "",
-                nome=None,
-                trial_start=started_at,
-                trial_end=trial_end,
-                converted=False if str(trial[5]).lower() == "active"
-                               else (str(trial[5]).lower() == "converted")
-            )
-    except Exception as e:
-        print("[trial_users] auditoria falhou:", e)
-
-    # >>> verifica se trial expirou <<<  (COLOQUE ANTES DO return)
-    try:
-        if trial:
-            end = _to_aware_utc(trial[4])
-            if end and end < datetime.now(timezone.utc):
-                from core.db import expire_trial
-                expire_trial(trial[0])
-                trial = None
-    except Exception as e:
-        print("[trial] erro ao expirar automaticamente:", e)
-
     return {
         "user_email": getattr(current_user, "email", None),
         "sub": sub,
