@@ -48,6 +48,7 @@ from core.providers.maps import RoutingProvider
 from core.solver.vrptw import solve_vrptw
 from core.maintenance.predictor import predict_failure_risk
 from core.telemetry import salvar_telemetria
+from routes.admin_routes import admin_bp
 
 
 # -----------------------------------------------------------------------------
@@ -1122,7 +1123,7 @@ app.register_blueprint(bp_contact)
 app.register_blueprint(bp_checkout)
 app.register_blueprint(bp_demo)
 app.register_blueprint(bp_account)
-
+app.register_blueprint(admin_bp, url_prefix="/admin")
 # -----------------------------------------------------------------------------
 # Run (dev)
 # -----------------------------------------------------------------------------

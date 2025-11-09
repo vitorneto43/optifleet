@@ -595,6 +595,72 @@ def get_latest_subscription_for_user(user_id: int):
 # =========================
 # Trials
 # =========================
+
+def list_trial_users(status: Optional[str] = None, q: Optional[str] = None,
+                     page: int = 1, per_page: int = 50) -> List[Tuple]:
+    """
+    Retorna (trial_id, user_id, email, started_at, ends_at, status)
+    status é 'active' ou 'expired'
+    """
+    offset = (page - 1) * per_page
+    params = {}
+    where = []
+    # status opcional
+    if status == "active":
+        where.append("t.ends_at >= NOW()")
+    elif status == "expired":
+        where.append("t.ends_at < NOW()")
+    # busca opcional por email
+    if q:
+        where.append("u.email ILIKE %(q)s")
+        params["q"] = f"%{q}%"
+
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+    sql = f"""
+        SELECT
+            t.id, t.user_id, u.email, t.started_at, t.ends_at,
+            CASE WHEN t.ends_at >= NOW() THEN 'active' ELSE 'expired' END AS status
+        FROM trials t
+        JOIN users u ON u.id = t.user_id
+        {where_sql}
+        ORDER BY t.ends_at DESC
+        LIMIT %(per_page)s OFFSET %(offset)s
+    """
+    params.update({"per_page": per_page, "offset": offset})
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+def trial_users_summary() -> Dict[str, int]:
+    """
+    Retorna {'ativos': X, 'expirados': Y, 'proximos_de_expirar': Z}
+    proximos_de_expirar = ends_at entre agora e 3 dias
+    """
+    sql = """
+        SELECT
+          COUNT(*) FILTER (WHERE ends_at >= NOW()) AS ativos,
+          COUNT(*) FILTER (WHERE ends_at < NOW()) AS expirados,
+          COUNT(*) FILTER (
+            WHERE ends_at BETWEEN NOW() AND NOW() + INTERVAL '3 days'
+          ) AS proximos_de_expirar
+        FROM trials
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql)
+        row = cur.fetchone()
+        return {
+            "ativos": row[0] or 0,
+            "expirados": row[1] or 0,
+            "proximos_de_expirar": row[2] or 0,
+        }
+
+def expire_trial(trial_id: int) -> None:
+    """Força o fim do trial (seta ends_at = NOW())"""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE trials SET ends_at = NOW() WHERE id = %s", (trial_id,))
+        conn.commit()
 def create_trial(user_id: int, plan: str, vehicles: int, days: int = 14) -> int:
     trial_id = _next_id("trials")
     now = datetime.now(timezone.utc)
@@ -619,10 +685,6 @@ def get_active_trial(user_id: int):
     con.close()
     return row
 
-def expire_trial(trial_id: int):
-    con = get_conn()
-    con.execute("UPDATE trials SET status='expired' WHERE id=?", [trial_id])
-    con.close()
 
 
 def mark_trial_converted(trial_id: int):
@@ -796,6 +858,4 @@ def contact_save(name: str, email: str, company: str, message: str):
     """, [cid, name, email, company, message, now])
     con.close()
     return cid
-
-
 
