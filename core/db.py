@@ -667,36 +667,66 @@ def trial_users_upsert(user_id:int, email:str, nome:str|None, trial_start, trial
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """, [tid, user_id, email, nome, trial_start, trial_end, 'convertido' if converted else 'ativo', converted])
 
-def list_trial_users(status:str|None=None, limit:int=200, offset:int=0):
-    with get_conn() as con:
-        if status:
-            return con.execute("""
-                SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
-                  FROM trial_users
-                 WHERE LOWER(status)=LOWER(?)
-                 ORDER BY updated_at DESC
-                 LIMIT ? OFFSET ?
-            """, [status, limit, offset]).fetchall()
-        return con.execute("""
-            SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
-              FROM trial_users
-             ORDER BY updated_at DESC
-             LIMIT ? OFFSET ?
-        """, [limit, offset]).fetchall()
+def list_trial_users(
+    as_admin: bool,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict]:
+    """
+    Se as_admin=True -> retorna todos os trials (paginado).
+    Senão -> retorna apenas do user_id.
+    """
+    with engine.connect() as conn:
+        if as_admin:
+            q = text("""
+                SELECT t.id, t.user_id, u.email, u.name,
+                       t.started_at, t.expires_at,
+                       CASE WHEN NOW() > t.expires_at THEN 0
+                            ELSE EXTRACT(EPOCH FROM (t.expires_at - NOW()))/86400
+                       END AS days_left
+                FROM trials t
+                JOIN users u ON u.id = t.user_id
+                ORDER BY t.started_at DESC
+                LIMIT :limit OFFSET :offset
+            """)
+            rows = conn.execute(q, {"limit": limit, "offset": offset}).mappings().all()
+        else:
+            if not user_id:
+                return []
+            q = text("""
+                SELECT t.id, t.user_id, u.email, u.name,
+                       t.started_at, t.expires_at,
+                       CASE WHEN NOW() > t.expires_at THEN 0
+                            ELSE EXTRACT(EPOCH FROM (t.expires_at - NOW()))/86400
+                       END AS days_left
+                FROM trials t
+                JOIN users u ON u.id = t.user_id
+                WHERE t.user_id = :user_id
+                ORDER BY t.started_at DESC
+                LIMIT :limit OFFSET :offset
+            """)
+            rows = conn.execute(q, {"user_id": user_id, "limit": limit, "offset": offset}).mappings().all()
+    # arredonda days_left pra cima (quem tem 0.3 dia ainda tem hoje)
+    for r in rows:
+        r["days_left"] = int(max(0, (r["days_left"] or 0) + 0.999))
+    return rows
 
-def trial_users_summary():
-    with get_conn() as con:
-        rows = con.execute("""
-            SELECT LOWER(COALESCE(status,'')) AS st, COUNT(*) 
-              FROM trial_users
-             GROUP BY st
-        """).fetchall()
-        out = {"ativos": 0, "expirados": 0, "convertidos": 0}
-        for st, n in rows:
-            if st == "ativo": out["ativos"] = n
-            elif st == "expirado": out["expirados"] = n
-            elif st == "convertido": out["convertidos"] = n
-        return out
+def trial_users_summary(as_admin: bool, user_id: Optional[str] = None) -> Dict:
+    with engine.connect() as conn:
+        base = """
+            FROM trials t
+            WHERE 1=1
+        """
+        params = {}
+        if not as_admin:
+            base += " AND t.user_id = :user_id"
+            params["user_id"] = user_id
+
+        total = conn.execute(text(f"SELECT COUNT(*) {base}"), params).scalar() or 0
+        ativos = conn.execute(text(f"SELECT COUNT(*) {base} AND NOW() <= t.expires_at"), params).scalar() or 0
+        expirados = total - ativos
+        return {"total": total, "ativos": ativos, "expirados": expirados}
 
 def get_latest_trial_for_user(user_id: int):
     """Último trial do usuário (ativo ou não)."""
@@ -766,4 +796,6 @@ def contact_save(name: str, email: str, company: str, message: str):
     """, [cid, name, email, company, message, now])
     con.close()
     return cid
+
+
 
