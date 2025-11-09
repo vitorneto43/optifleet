@@ -109,8 +109,6 @@ def _init_schema():
       PRIMARY KEY (id)
     );
     """)
-    # após criar trial_users:
-    _ensure_col("trial_users", "converted", "ALTER TABLE trial_users ADD COLUMN converted BOOLEAN DEFAULT FALSE;")
 
     # Contatos
     con.execute("""
@@ -169,6 +167,9 @@ def _init_schema():
     _ensure_col("trackers", "secret_token", "ALTER TABLE trackers ADD COLUMN secret_token TEXT;")
     _ensure_col("trackers", "status", "ALTER TABLE trackers ADD COLUMN status TEXT DEFAULT 'active';")
     _ensure_col("trackers", "vendor", "ALTER TABLE trackers ADD COLUMN vendor TEXT;")
+
+    # após criar trial_users:
+    _ensure_col("trial_users", "converted", "ALTER TABLE trial_users ADD COLUMN converted BOOLEAN DEFAULT FALSE;")
 
     con.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS ux_trackers_imei
