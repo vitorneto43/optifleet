@@ -4,6 +4,9 @@ import os
 import time
 from datetime import date, datetime, timedelta, timezone
 from math import radians, sin, cos, sqrt, atan2
+import json
+import csv
+from io import StringIO, BytesIO
 
 from dotenv import load_dotenv
 from flask import (
@@ -13,32 +16,17 @@ from flask import (
 from flask_login import (
     LoginManager, login_required, current_user
 )
+
+# ===== Core / DB / Visual =====
 from core.visual.map_render import build_map, _coerce_path_to_coords
-import json
-
-# ===== DB / Users =====
-from core.db import get_user_by_id, obter_posicoes, get_active_subscription
 from core.db import (
-    get_active_subscription, get_active_trial, create_trial,
-    trial_users_summary, list_trial_users
+    get_user_by_id, obter_posicoes, get_active_subscription, get_active_trial,
+    create_trial, expire_trial, trial_users_upsert, trial_users_summary,
+    list_trial_users, trial_users_backfill_from_trials, get_conn
 )
-from core.db import get_active_trial, expire_trial, trial_users_upsert
-from core.db import trial_users_backfill_from_trials
+from core.db_connection import close_db
 
-
-
-
-# ===== Core (rotas, solver, mapa, manutenção) =====
-from core.models import Location, TimeWindow, Depot, Vehicle, Stop, OptimizeRequest, hhmm_to_minutes
-from core.providers.maps import RoutingProvider
-from core.solver.vrptw import solve_vrptw
-from core.maintenance.predictor import predict_failure_risk
-from core.visual.map_render import build_map
-
-# ===== Telemetria (seed opcional) =====
-from core.telemetry import salvar_telemetria
-
-# ===== Blueprints =====
+# ===== Rotas/Blueprints =====
 from routes.auth_routes import bp_auth
 from routes.fleet_routes import bp_fleet
 from routes.telemetry_routes import bp_tele
@@ -52,109 +40,109 @@ from routes.trial_routes import bp_trial
 from routes.contact_routes import bp_contact
 from routes.checkout_routes import bp_checkout
 from routes.demo_routes import bp_demo
-
-from datetime import datetime, timezone
 from routes.account_routes import bp_account
-# Disponibiliza user/sub/trial globalmente nos templates (Jinja)
-from core.db import get_active_subscription, get_active_trial, create_trial
-from core.db import get_conn  # use o do core/db.py
-from core.db_connection import close_db
 
-# ===== Export helpers =====
-from io import StringIO, BytesIO
-import csv
+# ===== Solver / Providers / Maintenance =====
+from core.models import Location, TimeWindow, Depot, Vehicle, Stop, OptimizeRequest, hhmm_to_minutes
+from core.providers.maps import RoutingProvider
+from core.solver.vrptw import solve_vrptw
+from core.maintenance.predictor import predict_failure_risk
+from core.telemetry import salvar_telemetria
 
 
-# app.py (perto das helpers)
-
+# -----------------------------------------------------------------------------
 # App / Config
 # -----------------------------------------------------------------------------
 load_dotenv()
 app = Flask(__name__, template_folder="templates", static_folder="static")
-
-# 🔐 chave de sessão
 app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret-change-me")
 
-# Cookies permissivos no ambiente local http://127.0.0.1
+# Cookies permissivos em dev
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=False,
 )
 
-
-
-
-AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"  # ativa trial automática em dev
+AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"
 DEFAULT_TRIAL_PLAN = os.getenv("DEFAULT_TRIAL_PLAN", "full")
 DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
-DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "14"))
+# >>> 15 dias de verdade
+DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "15"))
 
-
-
-
-def _point_to_linestring_km(point, line):
-    # point: (lat, lon) ; line: [(lat, lon), ...]
-    # aproximação rápida: converte p/ metros via Haversine em segmentos
-    best = 1e9
-    for i in range(1, len(line)):
-        a, b = line[i-1], line[i]
-        # projeta ponto no segmento [a,b] em “coordenadas locais” simplificadas
-        # (ou use shapely se estiver disponível)
-        da = _haversine_km(point[0], point[1], a[0], a[1])
-        db = _haversine_km(point[0], point[1], b[0], b[1])
-        ab = _haversine_km(a[0], a[1], b[0], b[1])
-        # desigualdade triangular pra bound rápido
-        if ab > 0:
-            s = (da**2 - db**2 + ab**2) / (2*ab)
-            s = max(0, min(ab, s))
-            # distância perpendicular aproximada
-            h = (da**2 - s**2) ** 0.5 if da > s else abs((da**2 - s**2))**0.5
-            best = min(best, h)
-    return best
-
-# Helpers
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Utils / Helpers
+# -----------------------------------------------------------------------------
 def _to_aware_utc(dt):
-    """Converte dt (str/datetime) para datetime c/ tz=UTC."""
     if dt is None:
         return None
     if isinstance(dt, str):
-        # tolera formatos ISO sem timezone
         try:
-            dt = datetime.fromisoformat(dt.replace("Z","").split(".")[0])
+            dt = datetime.fromisoformat(dt.replace("Z", "").split(".")[0])
         except Exception:
             return None
     if dt.tzinfo is None:
-        # timestamp do DuckDB normalmente vem ingênuo -> assume UTC
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
-def _days_left(trial):
-    if not trial:
-        return None
-    end = None
-    # tenta dict
+def _status_of(record, idx_if_tuple=None, key_if_dict="status"):
+    """Extrai status robustamente de tupla ou dict."""
+    if not record:
+        return ""
     try:
-        end = trial.get("trial_end")
+        # dict-like
+        val = record.get(key_if_dict)
+        if val is not None:
+            return str(val).lower()
     except Exception:
         pass
-    # tenta posições comuns (started_at, trial_end, status costuma ser o 6)
-    if end is None:
-        for idx in (5, 4):  # cobre SELECTs diferentes
-            try:
-                end = trial[idx]
-                break
-            except Exception:
-                pass
-    end = _to_aware_utc(end)
+    if idx_if_tuple is not None:
+        try:
+            return str(record[idx_if_tuple]).lower()
+        except Exception:
+            pass
+    return ""
+
+def _trial_status_of(trial):
+    # layout comum: (id, user_id?, plan, vehicles, started_at, trial_end, status)
+    return _status_of(trial, idx_if_tuple=6, key_if_dict="status")
+
+def _trial_end_of(trial):
+    if not trial:
+        return None
+    try:
+        v = trial.get("trial_end")
+        if v:
+            return v
+    except Exception:
+        pass
+    # layouts mais vistos: started_at(4?) trial_end(5?) / started_at(3) trial_end(4)
+    for idx in (5, 4):
+        try:
+            return trial[idx]
+        except Exception:
+            continue
+    return None
+
+def _sub_status_of(sub):
+    # layout típico assinatura: (id, user_id, plan, ..., status)
+    return _status_of(sub, idx_if_tuple=4, key_if_dict="status")
+
+def _days_left(trial):
+    """Dias restantes inteiros, arredondando para cima (ceil)."""
+    if not trial:
+        return None
+    end = _to_aware_utc(_trial_end_of(trial))
     if not end:
         return None
     now = datetime.now(timezone.utc)
-    return max(0, int((end - now).total_seconds() // 86400))
-
+    sec = (end - now).total_seconds()
+    if sec <= 0:
+        return 0
+    # ceil para evitar mostrar '14' no mesmo dia da criação de um trial de 15 dias
+    from math import ceil
+    return int(ceil(sec / 86400))
 
 def _ensure_trial(user_id: int):
-    """Cria trial se não houver e AUTO_TRIAL estiver ligado."""
     if not AUTO_TRIAL or not user_id:
         return
     trial = get_active_trial(user_id)
@@ -171,64 +159,8 @@ def _ensure_trial(user_id: int):
     except Exception as e:
         print("[trial] falhou ao criar:", e)
 
-@app.before_request
-def _sync_trial_audit_and_expire():
-    try:
-        uid = int(getattr(current_user, "id", 0) or 0)
-        if not uid:
-            return
-
-        trial = get_active_trial(uid)  # (id, plan, vehicles, started_at, trial_end, status)
-        if not trial:
-            return
-
-        # Expira automaticamente se passou do fim
-        end = _to_aware_utc(trial[4])
-        if end and end < datetime.now(timezone.utc):
-            expire_trial(trial[0])
-            return
-
-        # Garante registro/atualização na auditoria
-        trial_users_upsert(
-            user_id=uid,
-            email=getattr(current_user, "email", "") or "",
-            nome=None,
-            trial_start=trial[3],
-            trial_end=trial[4],
-            converted=False if str(trial[5]).lower() == "active" else (str(trial[5]).lower() == "converted")
-        )
-    except Exception as e:
-        print("[before_request][trial_audit] erro:", e)
-
-def _trial_status_of(trial):
-    if not trial:
-        return ""
-    # Tenta dict; se for tupla, status costuma ser a última coluna (índice 6)
-    try:
-        return str(trial.get("status", "")).lower()
-    except Exception:
-        try:
-            return str(trial[6]).lower()
-        except Exception:
-            return ""
-
-def _trial_end_of(trial):
-    if not trial:
-        return None
-    try:
-        return trial.get("trial_end")
-    except Exception:
-        try:
-            return trial[5]  # started_at (3), trial_end (4 ou 5 conforme SELECT); ajustamos abaixo no _days_left
-        except Exception:
-            return None
-
-
 # -----------------------------------------------------------------------------
-
-
-# -----------------------------------------------------------------------------
-# Login
+# Login / Session
 # -----------------------------------------------------------------------------
 login_manager = LoginManager()
 login_manager.login_view = "auth.login_page"
@@ -268,28 +200,43 @@ def inject_globals():
         "days_left": _days_left(trial),
     }
 
+@app.before_request
+def _sync_trial_audit_and_expire():
+    try:
+        uid = int(getattr(current_user, "id", 0) or 0)
+        if not uid:
+            return
+        trial = get_active_trial(uid)
+        if not trial:
+            return
+
+        # expiração automática
+        end = _to_aware_utc(_trial_end_of(trial))
+        if end and end < datetime.now(timezone.utc):
+            try:
+                # tuple layout: id no índice 0
+                tid = trial[0] if not isinstance(trial, dict) else trial.get("id")
+                if tid:
+                    expire_trial(tid)
+            except Exception:
+                pass
+            return
+
+        # auditoria
+        trial_users_upsert(
+            user_id=uid,
+            email=getattr(current_user, "email", "") or "",
+            nome=None,
+            trial_start=trial[4] if not isinstance(trial, dict) else trial.get("started_at"),
+            trial_end=_trial_end_of(trial),
+            converted=(_trial_status_of(trial) == "converted"),
+        )
+    except Exception as e:
+        print("[before_request][trial_audit] erro:", e)
 
 # -----------------------------------------------------------------------------
-# Blueprints
+# Infra inicial (tabelas auxiliares)
 # -----------------------------------------------------------------------------
-app.register_blueprint(bp_auth)
-app.register_blueprint(bp_fleet)
-app.register_blueprint(bp_tele)
-app.register_blueprint(bp_reroute)
-app.register_blueprint(bp_notify)
-app.register_blueprint(bp_vendor)
-app.register_blueprint(bp_billing)
-app.register_blueprint(bp_asaas)
-app.register_blueprint(bp_asaas_webhook)
-app.register_blueprint(bp_trial)
-app.register_blueprint(bp_contact)
-app.register_blueprint(bp_checkout)
-app.register_blueprint(bp_demo)
-app.register_blueprint(bp_account)
-
-
-# garante tabela para guardar a última roteirização do usuário
-
 with get_conn() as con:
     con.execute("""
         CREATE TABLE IF NOT EXISTS last_plans (
@@ -300,11 +247,9 @@ with get_conn() as con:
             map_url     TEXT
         );
     """)
-    # DuckDB: PRAGMA table_info, não PRAGMA_table_info
     cols = {r[1].lower() for r in con.execute("PRAGMA table_info('last_plans')").fetchall()}
     if "path_json" not in cols:
         con.execute("ALTER TABLE last_plans ADD COLUMN path_json TEXT;")
-
 
 # -----------------------------------------------------------------------------
 # Assets / Providers
@@ -312,70 +257,53 @@ with get_conn() as con:
 (Path(app.static_folder) / "maps").mkdir(parents=True, exist_ok=True)
 rp = RoutingProvider()
 
-# Semente de telemetria (tenta uma vez)
 try:
     salvar_telemetria("empresa_123", "V1", -8.05, -34.9, 60.5, 80.0)
 except Exception:
     pass
 
 # -----------------------------------------------------------------------------
-# Rotas simples / páginas
+# Rotas simples
 # -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# HOME pública na raiz
 @app.get("/", endpoint="home")
 def home_public():
-    if current_user.is_authenticated:
+    if getattr(current_user, "is_authenticated", False):
         uid = int(current_user.id)
         sub = get_active_subscription(uid)
         trial = get_active_trial(uid)
-        sub_ok = bool(sub and str(sub[4]).lower() == "active")  # se seu SELECT de sub mudar, troque esse índice
-        trial_ok = (_trial_status_of(trial) == "active")
-        if sub_ok or trial_ok:
+        ok_sub = (_sub_status_of(sub) == "active")
+        ok_trial = (_trial_status_of(trial) == "active")
+        if ok_sub or ok_trial:
             return redirect(url_for("dashboard"))
-        # logado mas sem direito -> mostra landing com CTA
         return render_template("landing.html", paywall_hint=True, days_left=_days_left(trial))
-    # não logado -> landing pública
     return render_template("landing.html")
 
-
-
-# Alias opcional (pode manter /site apontando pra mesma landing)
 @app.get("/site")
 def landing():
     return render_template("landing.html")
-    # ou: return redirect(url_for("home_public"))
 
-# Dashboard protegido (com trial/assinatura)
 @app.get("/app")
 @login_required
 def dashboard():
     uid = int(current_user.id)
-
-    # (opcional) trial automático só em dev
     _ensure_trial(uid)
 
     sub = get_active_subscription(uid)
     trial = get_active_trial(uid)
-
-    ok_sub = bool(sub and (sub[4] == "active"))
-    ok_trial = bool(trial and (trial[5] == "active"))
+    ok_sub = (_sub_status_of(sub) == "active")
+    ok_trial = (_trial_status_of(trial) == "active")
 
     if ok_sub or ok_trial:
-        # se quiser manter os KPIs que você tinha:
         kpis = {"total_veiculos": 12, "viagens_hoje": 8, "viagens_semana": 43, "alertas": 3}
         return render_template("index.html", hide_paywall=True, kpis=kpis)
 
-    # sem sub/trial → volta para a landing pública
+    # sem direito → planos
     return redirect(url_for("billing.pricing_page"))
 
-
-
+# deixa pública para evitar loop / fricção
 @app.get("/pricing")
-@login_required
 def pricing_alias():
     return redirect(url_for("billing.pricing_page"))
-
 
 @app.get("/vehicles")
 @login_required
@@ -428,15 +356,12 @@ def demo_page():
 @app.get("/admin/trials")
 @login_required
 def admin_trials():
-    # (opcional) coloque aqui um gate simples para só o seu usuário ver:
-    # if int(current_user.id) != 1: return "Forbidden", 403
-
-    status = (request.args.get("status") or "").strip().lower() or None  # 'ativo'|'expirado'|'convertido' ou None
+    status = (request.args.get("status") or "").strip().lower() or None
     rows = list_trial_users(status=status, limit=500, offset=0)
     summary = trial_users_summary()
 
     html = ["<h2>Trials (auditoria)</h2>"]
-    html.append("<p>Resumo: " + ", ".join([f"{k}: {v}" for k,v in summary.items()]) + "</p>")
+    html.append("<p>Resumo: " + ", ".join([f"{k}: {v}" for k, v in summary.items()]) + "</p>")
     html.append("""
         <p>Filtrar:
           <a href="/admin/trials">todos</a> |
@@ -449,23 +374,23 @@ def admin_trials():
     html.append("<tr><th>User ID</th><th>Email</th><th>Nome</th><th>Início</th><th>Fim</th><th>Status</th><th>Atualizado</th></tr>")
     for r in rows:
         user_id, email, nome, ts, te, st, upd = r
-        html.append(f"<tr><td>{user_id}</td><td>{email}</td><td>{nome or ''}</td>"
-                    f"<td>{ts}</td><td>{te}</td><td>{st}</td><td>{upd}</td></tr>")
+        html.append(
+            f"<tr><td>{user_id}</td><td>{email}</td><td>{nome or ''}</td>"
+            f"<td>{ts}</td><td>{te}</td><td>{st}</td><td>{upd}</td></tr>"
+        )
     html.append("</table>")
     return "".join(html)
 
 @app.get("/admin/trials/backfill")
 @login_required
 def admin_trials_backfill():
-    # Gate simples para seu usuário (ajuste o ID se precisar):
     if int(current_user.id) != 1:
         return "Forbidden", 403
     trial_users_backfill_from_trials()
     return redirect(url_for("admin_trials"))
 
-
 # -----------------------------------------------------------------------------
-# KPIs (defensivo sobre DuckDB)
+# KPIs (defensivo)
 # -----------------------------------------------------------------------------
 @app.get("/api/kpis")
 @login_required
@@ -474,7 +399,6 @@ def api_kpis():
     try:
         conn = get_conn()
 
-        # Veículos com posição nos últimos 5min
         try:
             out["total_veiculos"] = conn.execute("""
                 SELECT COUNT(DISTINCT vehicle_id)
@@ -484,9 +408,8 @@ def api_kpis():
         except Exception:
             pass
 
-        desloc_thresh = 0.01  # ~1km+ (aprox) somando variação lat/lon
+        desloc_thresh = 0.01
 
-        # Viagens hoje
         try:
             out["viagens_hoje"] = conn.execute(f"""
                 SELECT COUNT(*) FROM (
@@ -501,7 +424,6 @@ def api_kpis():
         except Exception:
             pass
 
-        # Viagens na semana ISO corrente
         try:
             out["viagens_semana"] = conn.execute(f"""
                 WITH base AS (
@@ -520,10 +442,8 @@ def api_kpis():
         except Exception:
             pass
 
-        # Alertas (se existir speed)
         try:
             cols = {r[1].lower() for r in conn.execute("PRAGMA table_info('telemetry')").fetchall()}
-
             if "speed" in cols:
                 out["alertas"] = conn.execute("""
                     SELECT COUNT(*) FROM telemetry
@@ -538,7 +458,7 @@ def api_kpis():
     return jsonify(out)
 
 # -----------------------------------------------------------------------------
-# Telemetria (API leve + export)
+# Telemetria (APIs)
 # -----------------------------------------------------------------------------
 @app.get("/api/telemetry")
 @login_required
@@ -595,7 +515,7 @@ def _fetch_points(hours:int, vehicle_id:str|None=None, limit:int=20000):
                 "lon": float(r[2]),
                 "ts": str(r[3]),
                 "speed": float(r[4]),
-                "bearing": None,  # pode ser preenchido depois se quiser
+                "bearing": None,
             })
         except Exception:
             continue
@@ -610,7 +530,6 @@ def _detect_events(points, overspeed_kmh=100, stop_speed_kmh=3, stop_min_minutes
     for vid, group in groupby(points, key=lambda x: x["vehicle_id"]):
         g = list(group)
 
-        # overspeed
         for p in g:
             if p["speed"] > overspeed_kmh:
                 events.append({
@@ -619,7 +538,6 @@ def _detect_events(points, overspeed_kmh=100, stop_speed_kmh=3, stop_min_minutes
                     "value": p["speed"]
                 })
 
-        # stop (janela contínua com speed baixa)
         start_idx = None
         for i, p in enumerate(g):
             if p["speed"] < stop_speed_kmh:
@@ -658,7 +576,6 @@ def _detect_events(points, overspeed_kmh=100, stop_speed_kmh=3, stop_min_minutes
                     "minutes": round(mins, 1)
                 })
 
-        # harsh_turn: variação de rumo grande
         for i in range(1, len(g)):
             a, b = g[i-1], g[i]
             try:
@@ -697,9 +614,8 @@ def api_telemetry_events():
     stop_speed = float(request.args.get("stop_speed", 3))
     stop_minutes = float(request.args.get("stop_minutes", 5))
     harsh_turn = float(request.args.get("harsh_turn", 60))
-    buffer_km = float(request.args.get("offroute_km", 0.3))  # 300 m
+    buffer_km = float(request.args.get("offroute_km", 0.3))
 
-    # trilha e eventos básicos
     pts = _fetch_points(hours, vid)
     ev = _detect_events(
         pts,
@@ -709,7 +625,6 @@ def api_telemetry_events():
         harsh_turn_deg=harsh_turn
     )
 
-    # carrega a última linha planejada (por veículo)
     paths_by_vehicle = {}
     try:
         uid = int(current_user.id)
@@ -724,7 +639,6 @@ def api_telemetry_events():
     except Exception as e:
         print("[offroute] falha ao carregar path_json:", e)
 
-    # off-route por ponto
     if paths_by_vehicle:
         for p in pts:
             v = p["vehicle_id"]
@@ -746,7 +660,6 @@ def api_telemetry_events():
 
     return jsonify(ev)
 
-# app.py (ou routes/telemetry_routes.py)
 @app.get("/api/telemetry/series")
 @login_required
 def api_telemetry_series():
@@ -772,8 +685,6 @@ def api_telemetry_series():
         except Exception:
             continue
     return jsonify(out)
-
-
 
 @app.get("/api/telemetry/export")
 @login_required
@@ -1045,10 +956,7 @@ def optimize():
                     route["vehicle_id"] = v.id
                     abs_nodes = []
                     for n in route.get("nodes", []):
-                        if n == 0:
-                            abs_nodes.append(0)
-                        else:
-                            abs_nodes.append(1 + req.stops.index(subset[n - 1]))
+                        abs_nodes.append(0 if n == 0 else (1 + req.stops.index(subset[n - 1])))
                     route["nodes_abs"] = abs_nodes
                     route["nodes"] = route.get("nodes_abs", route.get("nodes", []))
                     results.append(route)
@@ -1100,14 +1008,13 @@ def optimize():
     color_by_vehicle = {vid: PALETTE[i % len(PALETTE)] for i, vid in enumerate(veh_ids)}
 
     def _fetch_path(origin_latlon, dest_latlon):
-        class P:  # mini wrapper
+        class P:
             def __init__(self, lat, lon):
                 self.lat = lat; self.lon = lon
         o = P(origin_latlon[0], origin_latlon[1])
         d = P(dest_latlon[0], dest_latlon[1])
         return rp.leg_polyline(o, d)
 
-    # --- construir a linha (sequência de [lat, lon]) por veículo ---
     def _ll(obj):
         try:
             return float(obj.loc.lat), float(obj.loc.lon)
@@ -1146,7 +1053,6 @@ def optimize():
         if full_coords:
             vehicle_paths[vid] = full_coords
 
-    # --- gerar o mapa ---
     map_ok = True
     try:
         build_map(
@@ -1161,7 +1067,6 @@ def optimize():
         print("[MAP] Falha ao gerar mapa:", e)
         map_ok = False
 
-    # --- salvar a última roteirização do usuário (inclui path_json!) ---
     uid = int(current_user.id)
     with get_conn() as con:
         con.execute("DELETE FROM last_plans WHERE user_id = ?", [uid])
@@ -1200,15 +1105,31 @@ def api_last_map():
         return jsonify({"ok": False, "map_url": ""}), 404
     return jsonify({"ok": True, "map_url": row[0]})
 
-
-
+# -----------------------------------------------------------------------------
+# Blueprints
+# -----------------------------------------------------------------------------
+app.register_blueprint(bp_auth)
+app.register_blueprint(bp_fleet)
+app.register_blueprint(bp_tele)
+app.register_blueprint(bp_reroute)
+app.register_blueprint(bp_notify)
+app.register_blueprint(bp_vendor)
+app.register_blueprint(bp_billing)
+app.register_blueprint(bp_asaas)
+app.register_blueprint(bp_asaas_webhook)
+app.register_blueprint(bp_trial)
+app.register_blueprint(bp_contact)
+app.register_blueprint(bp_checkout)
+app.register_blueprint(bp_demo)
+app.register_blueprint(bp_account)
 
 # -----------------------------------------------------------------------------
-# Run
+# Run (dev)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)
+
 
 
 
