@@ -18,6 +18,11 @@ import json
 
 # ===== DB / Users =====
 from core.db import get_user_by_id, obter_posicoes, get_active_subscription
+from core.db import (
+    get_active_subscription, get_active_trial, create_trial,
+    trial_users_upsert, trial_users_summary, list_trial_users
+)
+
 
 
 
@@ -52,13 +57,16 @@ from routes.account_routes import bp_account
 from core.db import get_active_subscription, get_active_trial, create_trial
 from core.db import get_conn  # use o do core/db.py
 from core.db_connection import close_db
-
+from core.db import expire_trial  # adicionar import
 # ===== Export helpers =====
 from io import StringIO, BytesIO
 import csv
 
 
 # app.py (perto das helpers)
+
+
+
 def _point_to_linestring_km(point, line):
     # point: (lat, lon) ; line: [(lat, lon), ...]
     # aproximação rápida: converte p/ metros via Haversine em segmentos
@@ -149,7 +157,8 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,
 )
 
-DB_PATH = os.environ.get("DUCKDB_PATH", "data/opti.duckdb")
+
+
 
 AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"  # ativa trial automática em dev
 DEFAULT_TRIAL_PLAN = os.getenv("DEFAULT_TRIAL_PLAN", "full")
@@ -191,36 +200,39 @@ def inject_globals():
     uid = int(getattr(current_user, "id", 0) or 0)
     sub = get_active_subscription(uid) if uid else None
     trial = get_active_trial(uid) if uid else None
+
+    # expira automaticamente se passou do fim
+    try:
+        if trial:
+            end = _to_aware_utc(trial[4])
+            if end and end < datetime.now(timezone.utc):
+                expire_trial(trial[0])
+                trial = None
+    except Exception as e:
+        print("[trial] erro ao expirar automaticamente:", e)
+
+    # auditoria (trial_users)
+    try:
+        if uid and trial:
+            started_at = trial[3]
+            trial_end  = trial[4]
+            trial_users_upsert(
+                user_id=uid,
+                email=getattr(current_user, "email", None) or "",
+                nome=None,
+                trial_start=started_at,
+                trial_end=trial_end,
+                converted=False if str(trial[5]).lower() == "active" else (str(trial[5]).lower() == "converted")
+            )
+    except Exception as e:
+        print("[trial_users] auditoria falhou:", e)
+
     return {
         "user_email": getattr(current_user, "email", None),
         "sub": sub,
         "trial": trial,
-        "days_left": _days_left(trial),  # <- use exatamente este
+        "days_left": _days_left(trial),
     }
-
-
-
-class UserObj:
-    def __init__(self, id, email):
-        self.id = str(id)
-        self.email = email
-    @property
-    def is_authenticated(self): return True
-    @property
-    def is_active(self): return True
-    @property
-    def is_anonymous(self): return False
-    def get_id(self): return self.id
-
-@login_manager.user_loader
-def load_user(user_id: str):
-    try:
-        row = get_user_by_id(int(user_id))
-    except Exception:
-        row = None
-    if not row:
-        return None
-    return UserObj(row["id"], row["email"])
 
 # -----------------------------------------------------------------------------
 # Blueprints
@@ -368,17 +380,35 @@ def _routes():
 def demo_page():
     return render_template("demo.html")
 
-@app.context_processor
-def inject_globals():
-    uid = int(getattr(current_user, "id", 0) or 0)
-    sub = get_active_subscription(uid) if uid else None
-    trial = get_active_trial(uid) if uid else None
-    return {
-        "user_email": getattr(current_user, "email", None),
-        "sub": sub,
-        "trial": trial,
-        "days_left": _days_left(trial),
-    }
+@app.get("/admin/trials")
+@login_required
+def admin_trials():
+    # (opcional) coloque aqui um gate simples para só o seu usuário ver:
+    # if int(current_user.id) != 1: return "Forbidden", 403
+
+    status = (request.args.get("status") or "").strip().lower() or None  # 'ativo'|'expirado'|'convertido' ou None
+    rows = list_trial_users(status=status, limit=500, offset=0)
+    summary = trial_users_summary()
+
+    html = ["<h2>Trials (auditoria)</h2>"]
+    html.append("<p>Resumo: " + ", ".join([f"{k}: {v}" for k,v in summary.items()]) + "</p>")
+    html.append("""
+        <p>Filtrar:
+          <a href="/admin/trials">todos</a> |
+          <a href="/admin/trials?status=ativo">ativos</a> |
+          <a href="/admin/trials?status=expirado">expirados</a> |
+          <a href="/admin/trials?status=convertido">convertidos</a>
+        </p>
+    """)
+    html.append("<table border=1 cellspacing=0 cellpadding=6>")
+    html.append("<tr><th>User ID</th><th>Email</th><th>Nome</th><th>Início</th><th>Fim</th><th>Status</th><th>Atualizado</th></tr>")
+    for r in rows:
+        user_id, email, nome, ts, te, st, upd = r
+        html.append(f"<tr><td>{user_id}</td><td>{email}</td><td>{nome or ''}</td>"
+                    f"<td>{ts}</td><td>{te}</td><td>{st}</td><td>{upd}</td></tr>")
+    html.append("</table>")
+    return "".join(html)
+
 
 # -----------------------------------------------------------------------------
 # KPIs (defensivo sobre DuckDB)
@@ -438,7 +468,8 @@ def api_kpis():
 
         # Alertas (se existir speed)
         try:
-            cols = {r[1].lower() for r in conn.execute("PRAGMA_table_info('telemetry')").fetchall()}
+            cols = {r[1].lower() for r in conn.execute("PRAGMA table_info('telemetry')").fetchall()}
+
             if "speed" in cols:
                 out["alertas"] = conn.execute("""
                     SELECT COUNT(*) FROM telemetry
@@ -458,7 +489,7 @@ def api_kpis():
 @app.get("/api/telemetry")
 @login_required
 def api_telemetry():
-    client_id = str(current_user.id)
+    client_id = int(current_user.id)
     rows = obter_posicoes(client_id)
     return jsonify(rows)
 
