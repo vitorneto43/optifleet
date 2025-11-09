@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import duckdb
 import secrets
 import os
-from core.db_connection import get_db  # ou o que você usa para abrir a conexão
+
 
 # =========================
 # Config / Conexão
@@ -137,6 +137,23 @@ def _init_schema():
               created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+    # Trial Users (auditoria de testes) — DuckDB friendly
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS trial_users (
+                id              INTEGER,
+                user_id         INTEGER NOT NULL,
+                email           TEXT NOT NULL,
+                nome            TEXT,
+                trial_start     TIMESTAMP NOT NULL,
+                trial_end       TIMESTAMP NOT NULL,
+                status          TEXT DEFAULT 'ativo',   -- 'ativo' | 'expirado' | 'convertido'
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id)
+            );
+        """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_trial_users_user ON trial_users(user_id);")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_trial_users_status ON trial_users(status);")
 
     # ---- migrações leves dentro do MESMO con ----
     def _ensure_col(table, col, ddl):
@@ -534,19 +551,40 @@ def get_subscription_by_provider_ref(provider_ref: str):
     con.close()
     return row
 
+# --- REMOVA esta linha do topo do db.py ---
+# from core.db_connection import get_db
+
+# ... restante do arquivo igual ...
+
 def get_latest_subscription_for_user(user_id: int):
-    """Retorna a assinatura mais recente do usuário."""
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        SELECT *
+    """Retorna a assinatura mais recente do usuário (via DuckDB, sem db_connection)."""
+    con = get_conn()
+    row = con.execute("""
+        SELECT id, user_id, plan, billing, vehicles, status,
+               started_at, current_period_end, provider, provider_ref
         FROM subscriptions
         WHERE user_id = ?
         ORDER BY started_at DESC
         LIMIT 1
-    """, (user_id,))
-    row = cur.fetchone()
-    return dict(row) if row else None
+    """, [user_id]).fetchone()
+    con.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "user_id": row[1],
+        "plan": row[2],
+        "billing": row[3],
+        "vehicles": row[4],
+        "status": row[5],
+        "started_at": row[6],
+        "current_period_end": row[7],
+        "provider": row[8],
+        "provider_ref": row[9],
+    }
+
+
+
 
 # =========================
 # Trials
@@ -580,10 +618,114 @@ def expire_trial(trial_id: int):
     con.execute("UPDATE trials SET status='expired' WHERE id=?", [trial_id])
     con.close()
 
+
 def mark_trial_converted(trial_id: int):
     con = get_conn()
     con.execute("UPDATE trials SET status='converted' WHERE id=?", [trial_id])
     con.close()
+
+# =========================
+# Trial Users (auditoria)
+# =========================
+def _status_from_dates(start: datetime, end: datetime, converted: bool = False) -> str:
+    if converted:
+        return "convertido"
+    now = datetime.now(timezone.utc)
+    return "ativo" if now <= end else "expirado"
+
+def trial_users_upsert(user_id: int, email: str, nome: str | None,
+                       trial_start: datetime, trial_end: datetime,
+                       converted: bool = False) -> int:
+    """Cria/atualiza um registro em trial_users para este user_id."""
+    st = _status_from_dates(trial_start, trial_end, converted)
+
+    con = get_conn()
+    row = con.execute("""
+        SELECT id FROM trial_users
+        WHERE user_id = ?
+        ORDER BY trial_end DESC
+        LIMIT 1
+    """, [user_id]).fetchone()
+
+    if row:
+        tid = row[0]
+        con.execute("""
+            UPDATE trial_users
+               SET email       = ?,
+                   nome        = ?,
+                   trial_start = ?,
+                   trial_end   = ?,
+                   status      = ?,
+                   updated_at  = CURRENT_TIMESTAMP
+             WHERE id = ?
+        """, [email, nome, trial_start, trial_end, st, tid])
+        con.close()
+        return int(tid)
+
+    tid = _next_id("trial_users")
+    con.execute("""
+        INSERT INTO trial_users (id, user_id, email, nome, trial_start, trial_end, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, [tid, user_id, email, nome, trial_start, trial_end, st])
+    con.close()
+    return tid
+
+def get_latest_trial_for_user(user_id: int):
+    """Último trial do usuário (ativo ou não)."""
+    con = get_conn()
+    row = con.execute("""
+        SELECT id, user_id, email, nome, trial_start, trial_end, status, created_at, updated_at
+        FROM trial_users
+        WHERE user_id = ?
+        ORDER BY trial_end DESC
+        LIMIT 1
+    """, [user_id]).fetchone()
+    con.close()
+    return row
+
+def list_trial_users(status: str | None = None, limit: int = 200, offset: int = 0):
+    """Lista usuários em trial; se status for informado, filtra ('ativo'|'expirado'|'convertido')."""
+    con = get_conn()
+    if status:
+        rows = con.execute("""
+            SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
+            FROM trial_users
+            WHERE status = ?
+            ORDER BY trial_end DESC
+            LIMIT ? OFFSET ?
+        """, [status, limit, offset]).fetchall()
+    else:
+        rows = con.execute("""
+            SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
+            FROM trial_users
+            ORDER BY trial_end DESC
+            LIMIT ? OFFSET ?
+        """, [limit, offset]).fetchall()
+    con.close()
+    return rows
+
+def trial_users_summary():
+    """Resumo com contagem por status."""
+    con = get_conn()
+    rows = con.execute("""
+        SELECT status, COUNT(*) AS qtd
+        FROM trial_users
+        GROUP BY status
+        ORDER BY status
+    """).fetchall()
+    con.close()
+    return {r[0]: r[1] for r in rows}
+
+def mark_trial_converted_by_user(user_id: int):
+    """Conveniente p/ quando o usuário assina e converte o trial."""
+    con = get_conn()
+    con.execute("""
+        UPDATE trial_users
+           SET status = 'convertido', updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = ? AND status <> 'convertido'
+    """, [user_id])
+    con.close()
+
 
 # =========================
 # Contatos
