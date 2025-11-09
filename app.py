@@ -20,7 +20,7 @@ import json
 from core.db import get_user_by_id, obter_posicoes, get_active_subscription
 from core.db import (
     get_active_subscription, get_active_trial, create_trial,
-    trial_users_upsert, trial_users_summary, list_trial_users
+    trial_users_summary, list_trial_users
 )
 
 
@@ -201,19 +201,10 @@ def inject_globals():
     sub = get_active_subscription(uid) if uid else None
     trial = get_active_trial(uid) if uid else None
 
-    # expira automaticamente se passou do fim
-    try:
-        if trial:
-            end = _to_aware_utc(trial[4])
-            if end and end < datetime.now(timezone.utc):
-                expire_trial(trial[0])
-                trial = None
-    except Exception as e:
-        print("[trial] erro ao expirar automaticamente:", e)
-
-    # auditoria (trial_users)
+    # >>> registra/atualiza auditoria de trial_users <<<
     try:
         if uid and trial:
+            from core.db import trial_users_upsert  # import LOCAL para evitar circular
             started_at = trial[3]
             trial_end  = trial[4]
             trial_users_upsert(
@@ -222,10 +213,22 @@ def inject_globals():
                 nome=None,
                 trial_start=started_at,
                 trial_end=trial_end,
-                converted=False if str(trial[5]).lower() == "active" else (str(trial[5]).lower() == "converted")
+                converted=False if str(trial[5]).lower() == "active"
+                               else (str(trial[5]).lower() == "converted")
             )
     except Exception as e:
         print("[trial_users] auditoria falhou:", e)
+
+    # >>> verifica se trial expirou <<<  (COLOQUE ANTES DO return)
+    try:
+        if trial:
+            end = _to_aware_utc(trial[4])
+            if end and end < datetime.now(timezone.utc):
+                from core.db import expire_trial
+                expire_trial(trial[0])
+                trial = None
+    except Exception as e:
+        print("[trial] erro ao expirar automaticamente:", e)
 
     return {
         "user_email": getattr(current_user, "email", None),
@@ -233,6 +236,7 @@ def inject_globals():
         "trial": trial,
         "days_left": _days_left(trial),
     }
+
 
 # -----------------------------------------------------------------------------
 # Blueprints
