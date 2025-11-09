@@ -655,6 +655,31 @@ def trial_users_summary() -> Dict[str, int]:
             "expirados": row[1] or 0,
             "proximos_de_expirar": row[2] or 0,
         }
+def trial_users_upsert(user_id:int, email:str, nome:str|None, trial_start, trial_end, converted:bool):
+    with get_conn() as con:
+        # gera id sequencial opcional
+        tid = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM trial_users").fetchone()[0]
+        # tenta encontrar registro atual do usuário
+        row = con.execute("""
+            SELECT id FROM trial_users WHERE user_id = ?
+        """, [user_id]).fetchone()
+        if row:
+            con.execute("""
+                UPDATE trial_users
+                   SET email=?, nome=?, trial_start=?, trial_end=?, 
+                       status = CASE 
+                                  WHEN ? THEN 'convertido' 
+                                  ELSE 'ativo' 
+                                END,
+                       converted=?, updated_at=CURRENT_TIMESTAMP
+                 WHERE user_id=?
+            """, [email, nome, trial_start, trial_end, converted, converted, user_id])
+        else:
+            con.execute("""
+                INSERT INTO trial_users
+                  (id, user_id, email, nome, trial_start, trial_end, status, converted, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, [tid, user_id, email, nome, trial_start, trial_end, 'convertido' if converted else 'ativo', converted])
 
 def expire_trial(trial_id: int) -> None:
     """Força o fim do trial (seta ends_at = NOW())"""
@@ -703,31 +728,7 @@ def _status_from_dates(start: datetime, end: datetime, converted: bool = False) 
 
 # core/db.py (trechos essenciais)
 
-def trial_users_upsert(user_id:int, email:str, nome:str|None, trial_start, trial_end, converted:bool):
-    with get_conn() as con:
-        # gera id sequencial opcional
-        tid = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM trial_users").fetchone()[0]
-        # tenta encontrar registro atual do usuário
-        row = con.execute("""
-            SELECT id FROM trial_users WHERE user_id = ?
-        """, [user_id]).fetchone()
-        if row:
-            con.execute("""
-                UPDATE trial_users
-                   SET email=?, nome=?, trial_start=?, trial_end=?, 
-                       status = CASE 
-                                  WHEN ? THEN 'convertido' 
-                                  ELSE 'ativo' 
-                                END,
-                       converted=?, updated_at=CURRENT_TIMESTAMP
-                 WHERE user_id=?
-            """, [email, nome, trial_start, trial_end, converted, converted, user_id])
-        else:
-            con.execute("""
-                INSERT INTO trial_users
-                  (id, user_id, email, nome, trial_start, trial_end, status, converted, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """, [tid, user_id, email, nome, trial_start, trial_end, 'convertido' if converted else 'ativo', converted])
+
 
 def list_trial_users(
     as_admin: bool,
