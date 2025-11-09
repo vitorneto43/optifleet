@@ -66,6 +66,29 @@ import csv
 
 # app.py (perto das helpers)
 
+# App / Config
+# -----------------------------------------------------------------------------
+load_dotenv()
+app = Flask(__name__, template_folder="templates", static_folder="static")
+
+# 🔐 chave de sessão
+app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret-change-me")
+
+# Cookies permissivos no ambiente local http://127.0.0.1
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=False,
+)
+
+
+
+
+AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"  # ativa trial automática em dev
+DEFAULT_TRIAL_PLAN = os.getenv("DEFAULT_TRIAL_PLAN", "full")
+DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
+DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "14"))
+
+
 
 
 def _point_to_linestring_km(point, line):
@@ -173,27 +196,6 @@ def _sync_trial_audit_and_expire():
         print("[before_request][trial_audit] erro:", e)
 
 # -----------------------------------------------------------------------------
-# App / Config
-# -----------------------------------------------------------------------------
-load_dotenv()
-app = Flask(__name__, template_folder="templates", static_folder="static")
-
-# 🔐 chave de sessão
-app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret-change-me")
-
-# Cookies permissivos no ambiente local http://127.0.0.1
-app.config.update(
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=False,
-)
-
-
-
-
-AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"  # ativa trial automática em dev
-DEFAULT_TRIAL_PLAN = os.getenv("DEFAULT_TRIAL_PLAN", "full")
-DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
-DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "14"))
 
 
 # -----------------------------------------------------------------------------
