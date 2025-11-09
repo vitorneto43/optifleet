@@ -633,42 +633,64 @@ def _status_from_dates(start: datetime, end: datetime, converted: bool = False) 
     now = datetime.now(timezone.utc)
     return "ativo" if now <= end else "expirado"
 
-def trial_users_upsert(user_id: int, email: str, nome: str | None,
-                       trial_start: datetime, trial_end: datetime,
-                       converted: bool = False) -> int:
-    """Cria/atualiza um registro em trial_users para este user_id."""
-    st = _status_from_dates(trial_start, trial_end, converted)
+# core/db.py (trechos essenciais)
 
-    con = get_conn()
-    row = con.execute("""
-        SELECT id FROM trial_users
-        WHERE user_id = ?
-        ORDER BY trial_end DESC
-        LIMIT 1
-    """, [user_id]).fetchone()
+def trial_users_upsert(user_id:int, email:str, nome:str|None, trial_start, trial_end, converted:bool):
+    with get_conn() as con:
+        # gera id sequencial opcional
+        tid = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM trial_users").fetchone()[0]
+        # tenta encontrar registro atual do usuário
+        row = con.execute("""
+            SELECT id FROM trial_users WHERE user_id = ?
+        """, [user_id]).fetchone()
+        if row:
+            con.execute("""
+                UPDATE trial_users
+                   SET email=?, nome=?, trial_start=?, trial_end=?, 
+                       status = CASE 
+                                  WHEN ? THEN 'convertido' 
+                                  ELSE 'ativo' 
+                                END,
+                       converted=?, updated_at=CURRENT_TIMESTAMP
+                 WHERE user_id=?
+            """, [email, nome, trial_start, trial_end, converted, converted, user_id])
+        else:
+            con.execute("""
+                INSERT INTO trial_users
+                  (id, user_id, email, nome, trial_start, trial_end, status, converted, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, [tid, user_id, email, nome, trial_start, trial_end, 'convertido' if converted else 'ativo', converted])
 
-    if row:
-        tid = row[0]
-        con.execute("""
-            UPDATE trial_users
-               SET email       = ?,
-                   nome        = ?,
-                   trial_start = ?,
-                   trial_end   = ?,
-                   status      = ?,
-                   updated_at  = CURRENT_TIMESTAMP
-             WHERE id = ?
-        """, [email, nome, trial_start, trial_end, st, tid])
-        con.close()
-        return int(tid)
+def list_trial_users(status:str|None=None, limit:int=200, offset:int=0):
+    with get_conn() as con:
+        if status:
+            return con.execute("""
+                SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
+                  FROM trial_users
+                 WHERE LOWER(status)=LOWER(?)
+                 ORDER BY updated_at DESC
+                 LIMIT ? OFFSET ?
+            """, [status, limit, offset]).fetchall()
+        return con.execute("""
+            SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
+              FROM trial_users
+             ORDER BY updated_at DESC
+             LIMIT ? OFFSET ?
+        """, [limit, offset]).fetchall()
 
-    tid = _next_id("trial_users")
-    con.execute("""
-        INSERT INTO trial_users (id, user_id, email, nome, trial_start, trial_end, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, [tid, user_id, email, nome, trial_start, trial_end, st])
-    con.close()
-    return tid
+def trial_users_summary():
+    with get_conn() as con:
+        rows = con.execute("""
+            SELECT LOWER(COALESCE(status,'')) AS st, COUNT(*) 
+              FROM trial_users
+             GROUP BY st
+        """).fetchall()
+        out = {"ativos": 0, "expirados": 0, "convertidos": 0}
+        for st, n in rows:
+            if st == "ativo": out["ativos"] = n
+            elif st == "expirado": out["expirados"] = n
+            elif st == "convertido": out["convertidos"] = n
+        return out
 
 def get_latest_trial_for_user(user_id: int):
     """Último trial do usuário (ativo ou não)."""
@@ -683,38 +705,7 @@ def get_latest_trial_for_user(user_id: int):
     con.close()
     return row
 
-def list_trial_users(status: str | None = None, limit: int = 200, offset: int = 0):
-    """Lista usuários em trial; se status for informado, filtra ('ativo'|'expirado'|'convertido')."""
-    con = get_conn()
-    if status:
-        rows = con.execute("""
-            SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
-            FROM trial_users
-            WHERE status = ?
-            ORDER BY trial_end DESC
-            LIMIT ? OFFSET ?
-        """, [status, limit, offset]).fetchall()
-    else:
-        rows = con.execute("""
-            SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
-            FROM trial_users
-            ORDER BY trial_end DESC
-            LIMIT ? OFFSET ?
-        """, [limit, offset]).fetchall()
-    con.close()
-    return rows
 
-def trial_users_summary():
-    """Resumo com contagem por status."""
-    con = get_conn()
-    rows = con.execute("""
-        SELECT status, COUNT(*) AS qtd
-        FROM trial_users
-        GROUP BY status
-        ORDER BY status
-    """).fetchall()
-    con.close()
-    return {r[0]: r[1] for r in rows}
 
 def mark_trial_converted_by_user(user_id: int):
     """Conveniente p/ quando o usuário assina e converte o trial."""
