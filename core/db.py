@@ -10,7 +10,7 @@ import os
 # =========================
 # Config / Conexão
 # =========================
-DB_PATH = Path("data/optifleet.duckdb")
+DB_PATH = Path("data.duckdb")
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 def get_conn():
