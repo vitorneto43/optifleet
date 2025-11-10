@@ -4,6 +4,7 @@ from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+import traceback
 
 from core.db import get_conn, upsert_vehicle, list_vehicles, delete_vehicle, tracker_bind_vehicle
 
@@ -18,95 +19,51 @@ def _client_id() -> int:
 def _validate_imei(imei: str) -> bool:
     return imei.isdigit() and len(imei) == 15
 
-def _rows_to_dicts(conn, rows):
-    cols = [c[0] for c in conn.description]
-    out = []
-    for r in rows:
-        d = {}
-        for k, v in zip(cols, r):
-            d[k] = v
-        out.append(d)
-    return out
-
 # ---------------------------------------------------------------------
-# Listar veículos (com IMEI/vendor e última posição)
+# Listar veículos
 # ---------------------------------------------------------------------
 @bp_fleet.get("/vehicles")
 @login_required
 def api_list_vehicles():
-    q = (request.args.get("q") or "").strip()
-    only = (request.args.get("status") or "").strip().lower()
+    try:
+        client_id = _client_id()
+        q = (request.args.get("q") or "").strip()
+        only = (request.args.get("status") or "").strip().lower()
 
-    where = []
-    params: List[Any] = []
-
-    if q:
-        where.append("""(
-            v.id ILIKE ? OR v.name ILIKE ? OR v.plate ILIKE ? OR
-            v.driver ILIKE ? OR v.tags ILIKE ?
-        )""")
-        pat = f"%{q}%"
-        params += [pat, pat, pat, pat, pat]
-
-    if only in ("online", "offline", "maintenance"):
-        where.append("COALESCE(v.status,'offline') = ?")
-        params.append(only)
-
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-
-    with get_conn() as conn:
-        # última posição via agregação em telemetry
-        sql = f"""
-          SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
-                 v.next_service_km, v.last_service_km, v.tags, v.notes, v.obd_id,
-                 tp.last_lat, tp.last_lon, tp.last_ts,
-                 t.imei, t.vendor
-          FROM vehicles v
-          LEFT JOIN (
-            SELECT vehicle_id,
-                   ANY_VALUE(lat) AS last_lat,
-                   ANY_VALUE(lon) AS last_lon,
-                   MAX(timestamp)  AS last_ts
-            FROM telemetry
-            GROUP BY vehicle_id
-          ) tp ON tp.vehicle_id = v.id
-          LEFT JOIN trackers t ON t.vehicle_id = v.id
-          {where_sql}
-          ORDER BY v.id
-        """
-        rows = conn.execute(sql, params).fetchall()
-        out = _rows_to_dicts(conn, rows)
-        # normalização leve
-        for r in out:
-            # datas -> string ISO
-            if r.get("last_ts") is not None:
-                r["last_ts"] = str(r["last_ts"])
-        return jsonify(out)
+        print(f"[DEBUG] GET /vehicles - client_id: {client_id}, q: {q}, only: {only}")
+        
+        # Usa a função do core.db que já está testada
+        vehicles = list_vehicles(client_id, q or None, only or None)
+        
+        # Converte para o formato esperado pelo frontend
+        result = []
+        for v in vehicles:
+            vehicle_data = {
+                "id": v[0], "name": v[1], "plate": v[2], "driver": v[3],
+                "capacity": v[4], "status": v[5], 
+                "last_lat": v[6], "last_lon": v[7], "last_speed": v[8], "last_ts": v[9],
+                "last_service_km": v[10], "last_service_date": v[11], 
+                "next_service_km": v[12], "notes": v[13],
+                "tracker_id": v[14], "imei": v[15], "vendor": v[16]
+            }
+            # Converte datetime para string
+            if vehicle_data.get("last_ts"):
+                vehicle_data["last_ts"] = str(vehicle_data["last_ts"])
+            if vehicle_data.get("last_service_date"):
+                vehicle_data["last_service_date"] = str(vehicle_data["last_service_date"])
+                
+            result.append(vehicle_data)
+            
+        print(f"[DEBUG] GET /vehicles - encontrados: {len(result)} veículos")
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"[ERROR] GET /vehicles: {e}")
+        print(traceback.format_exc())
+        return jsonify({"error": "Erro interno ao listar veículos"}), 500
 
 # ---------------------------------------------------------------------
-# Obter um veículo
-# ---------------------------------------------------------------------
-@bp_fleet.get("/vehicles/<vid>")
-@login_required
-def api_get_vehicle(vid):
-    with get_conn() as conn:
-        rows = conn.execute("""
-          SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
-                 v.next_service_km, v.last_service_km, v.tags, v.notes, v.obd_id,
-                 t.imei, t.vendor
-          FROM vehicles v
-          LEFT JOIN trackers t ON t.vehicle_id = v.id
-          WHERE v.id = ?
-        """, [vid]).fetchall()
-        if not rows:
-            return jsonify({"ok": False, "error": "not_found"}), 404
-        d = _rows_to_dicts(conn, rows)[0]
-        if d.get("last_ts") is not None:
-            d["last_ts"] = str(d["last_ts"])
-        return jsonify(d)
-
-# ---------------------------------------------------------------------
-# Criar/Atualizar veículo (POST para ambos - compatível com frontend)
+# Criar/Atualizar veículo (POST)
 # ---------------------------------------------------------------------
 @bp_fleet.post("/vehicles")
 @login_required
@@ -115,140 +72,103 @@ def api_create_vehicle():
         data = request.get_json(force=True) or {}
         client_id = _client_id()
         
-        print(f"[DEBUG] POST /vehicles - Data: {data}")
+        print(f"[DEBUG] POST /vehicles - client_id: {client_id}")
+        print(f"[DEBUG] POST /vehicles - data: {data}")
         
         # Validação básica
         if not data.get("id"):
-            return jsonify({"ok": False, "error": "ID do veículo é obrigatório"}), 400
+            return jsonify({"error": "ID do veículo é obrigatório"}), 400
 
-        # Usa a função upsert_vehicle do core.db (compatível com o schema real)
-        upsert_vehicle(client_id, data)
+        # Prepara dados para upsert_vehicle
+        vehicle_data = {
+            "id": data["id"],
+            "name": data.get("name", ""),
+            "plate": data.get("plate", ""),
+            "driver": data.get("driver", ""),
+            "capacity": data.get("capacity", 0),
+            "status": data.get("status", "offline"),
+            "tags": data.get("tags", ""),
+            "obd_id": data.get("obd_id", ""),
+            "notes": data.get("notes", "")
+        }
         
-        # Se veio IMEI, faz o bind do tracker
-        imei = (data.get("imei") or "").strip()
-        if imei:
-            if not _validate_imei(imei):
-                return jsonify({"ok": False, "error": "IMEI inválido (use 15 dígitos)."}), 400
-            
-            # Usa a função do core.db para vincular tracker
-            success = tracker_bind_vehicle(
-                client_id=client_id,
-                tracker_id=imei,  # Usa IMEI como tracker_id
-                vehicle_id=data["id"],
-                force=True
-            )
-            
-            if not success:
-                return jsonify({"ok": False, "error": "Falha ao vincular tracker"}), 400
-
-        return jsonify({"ok": True, "message": "Veículo salvo com sucesso"})
-        
-    except Exception as e:
-        print(f"[ERROR] POST /vehicles: {e}")
-        return jsonify({"ok": False, "error": f"Erro interno: {str(e)}"}), 500
-
-# ---------------------------------------------------------------------
-# Atualizar veículo (PUT)
-# ---------------------------------------------------------------------
-@bp_fleet.put("/vehicles/<vid>")
-@login_required
-def api_update_vehicle(vid):
-    try:
-        data = request.get_json(force=True) or {}
-        client_id = _client_id()
-        
-        # Garante que o ID na URL seja usado
-        data["id"] = vid
-        
-        print(f"[DEBUG] PUT /vehicles/{vid} - Data: {data}")
+        print(f"[DEBUG] POST /vehicles - vehicle_data: {vehicle_data}")
         
         # Usa a função upsert_vehicle do core.db
-        upsert_vehicle(client_id, data)
+        upsert_vehicle(client_id, vehicle_data)
+        print(f"[DEBUG] POST /vehicles - upsert_vehicle concluído")
         
         # Se veio IMEI, faz o bind do tracker
         imei = (data.get("imei") or "").strip()
         if imei:
+            print(f"[DEBUG] POST /vehicles - processando IMEI: {imei}")
             if not _validate_imei(imei):
-                return jsonify({"ok": False, "error": "IMEI inválido (use 15 dígitos)."}), 400
+                return jsonify({"error": "IMEI inválido (use 15 dígitos)."}), 400
             
             success = tracker_bind_vehicle(
                 client_id=client_id,
                 tracker_id=imei,
-                vehicle_id=vid,
+                vehicle_id=data["id"],
                 force=True
             )
             
+            print(f"[DEBUG] POST /vehicles - tracker_bind_vehicle resultado: {success}")
+            
             if not success:
-                return jsonify({"ok": False, "error": "Falha ao vincular tracker"}), 400
+                return jsonify({"error": "Falha ao vincular tracker"}), 400
 
-        return jsonify({"ok": True, "message": "Veículo atualizado com sucesso"})
+        return jsonify({"success": True, "message": "Veículo salvo com sucesso"})
         
     except Exception as e:
-        print(f"[ERROR] PUT /vehicles/{vid}: {e}")
-        return jsonify({"ok": False, "error": f"Erro interno: {str(e)}"}), 500
+        print(f"[ERROR] POST /vehicles: {str(e)}")
+        print(f"[ERROR] POST /vehicles traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Erro interno: {str(e)}"}), 500
 
 # ---------------------------------------------------------------------
-# Excluir veículo (desvincula tracker)
+# Obter um veículo
 # ---------------------------------------------------------------------
-@bp_fleet.delete("/vehicles/<vid>")
+@bp_fleet.get("/vehicles/<vid>")
 @login_required
-def api_delete_vehicle(vid):
+def api_get_vehicle(vid):
     try:
         client_id = _client_id()
+        print(f"[DEBUG] GET /vehicles/{vid} - client_id: {client_id}")
         
-        # Usa a função do core.db para deletar
-        delete_vehicle(client_id, vid)
-        
-        return jsonify({"ok": True, "message": "Veículo excluído"})
-        
-    except Exception as e:
-        print(f"[ERROR] DELETE /vehicles/{vid}: {e}")
-        return jsonify({"ok": False, "error": f"Erro interno: {str(e)}"}), 500
-
-# ---------------------------------------------------------------------
-# Importar veículos em lote
-# ---------------------------------------------------------------------
-@bp_fleet.post("/vehicles/import")
-@login_required
-def api_import_vehicles():
-    try:
-        data = request.get_json(force=True) or {}
-        rows = data.get("rows") or []
-        client_id = _client_id()
-        
-        if not isinstance(rows, list) or not rows:
-            return jsonify({"ok": False, "error": "empty_rows"}), 400
-
-        ok, bad = 0, 0
-        for row in rows:
-            try:
-                if not row.get("id"):
-                    bad += 1
-                    continue
-                    
-                # Usa a função do core.db
-                upsert_vehicle(client_id, row)
+        with get_conn() as conn:
+            row = conn.execute("""
+                SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
+                       v.last_lat, v.last_lon, v.last_speed, v.last_ts,
+                       v.last_service_km, v.last_service_date, v.next_service_km, v.notes,
+                       t.tracker_id, t.imei, t.vendor
+                FROM vehicles v
+                LEFT JOIN trackers t ON t.client_id = v.client_id AND t.vehicle_id = v.id
+                WHERE v.client_id = ? AND v.id = ?
+            """, [client_id, vid]).fetchone()
+            
+            if not row:
+                return jsonify({"error": "Veículo não encontrado"}), 404
                 
-                # Se veio IMEI, vincula tracker
-                imei = (row.get("imei") or "").strip()
-                if imei and _validate_imei(imei):
-                    tracker_bind_vehicle(
-                        client_id=client_id,
-                        tracker_id=imei,
-                        vehicle_id=row["id"],
-                        force=True
-                    )
-                    
-                ok += 1
-            except Exception as e:
-                print(f"[ERROR] Import row {row.get('id')}: {e}")
-                bad += 1
-
-        return jsonify({"ok": True, "imported": ok, "skipped": bad})
-        
+            vehicle_data = {
+                "id": row[0], "name": row[1], "plate": row[2], "driver": row[3],
+                "capacity": row[4], "status": row[5], 
+                "last_lat": row[6], "last_lon": row[7], "last_speed": row[8], "last_ts": row[9],
+                "last_service_km": row[10], "last_service_date": row[11], 
+                "next_service_km": row[12], "notes": row[13],
+                "tracker_id": row[14], "imei": row[15], "vendor": row[16]
+            }
+            
+            # Converte datetime para string
+            if vehicle_data.get("last_ts"):
+                vehicle_data["last_ts"] = str(vehicle_data["last_ts"])
+            if vehicle_data.get("last_service_date"):
+                vehicle_data["last_service_date"] = str(vehicle_data["last_service_date"])
+                
+            return jsonify(vehicle_data)
+            
     except Exception as e:
-        print(f"[ERROR] POST /vehicles/import: {e}")
-        return jsonify({"ok": False, "error": f"Erro interno: {str(e)}"}), 500
+        print(f"[ERROR] GET /vehicles/{vid}: {e}")
+        print(traceback.format_exc())
+        return jsonify({"error": "Erro interno ao buscar veículo"}), 500
 
 # ---------------------------------------------------------------------
 # Rota de debug para testar
@@ -256,65 +176,32 @@ def api_import_vehicles():
 @bp_fleet.get("/debug")
 @login_required
 def api_debug():
-    return jsonify({
-        "client_id": _client_id(),
-        "status": "ok",
-        "message": "API Fleet funcionando"
-    })
+    try:
+        client_id = _client_id()
+        return jsonify({
+            "client_id": client_id,
+            "status": "ok",
+            "message": "API Fleet funcionando",
+            "user_authenticated": current_user.is_authenticated
+        })
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
 # ---------------------------------------------------------------------
-# Atualizar status/última posição a partir de telemetry
+# Health check (sem autenticação)
 # ---------------------------------------------------------------------
-@bp_fleet.post("/vehicles/refresh_last_pos")
-@login_required
-def refresh_last_pos():
+@bp_fleet.get("/health")
+def health_check():
     try:
-        now = datetime.now(timezone.utc)
-        client_id = _client_id()
-        
-        with get_conn() as con:
-            # última posição por veículo
-            rows = con.execute("""
-              WITH lastp AS (
-                SELECT vehicle_id, MAX(timestamp) AS last_ts
-                FROM telemetry
-                WHERE client_id = ?
-                GROUP BY vehicle_id
-              )
-              SELECT p.vehicle_id, p.lat, p.lon, p.speed, p.timestamp AS ts
-              FROM telemetry p
-              JOIN lastp l
-                ON l.vehicle_id = p.vehicle_id AND l.last_ts = p.timestamp
-              WHERE p.client_id = ?
-            """, [client_id, client_id]).fetchall()
-            
-            cols = [c[0] for c in con.description]
-            for r in rows:
-                rec = dict(zip(cols, r))
-                is_online = False
-                try:
-                    ts = rec["ts"]
-                    if getattr(ts, "tzinfo", None) is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    is_online = (now - ts).total_seconds() < 600
-                except Exception:
-                    pass
-                
-                # Atualiza status do veículo
-                upsert_vehicle(client_id, {
-                    "id": rec["vehicle_id"],
-                    "status": "online" if is_online else "offline",
-                    "last_lat": rec["lat"],
-                    "last_lon": rec["lon"],
-                    "last_speed": rec["speed"],
-                    "last_ts": rec["ts"]
-                })
-                
-        return jsonify({"ok": True})
-        
+        with get_conn() as conn:
+            conn.execute("SELECT 1")
+        return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
-        print(f"[ERROR] POST /refresh_last_pos: {e}")
-        return jsonify({"ok": False, "error": f"Erro interno: {str(e)}"}), 500
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 
 
