@@ -41,6 +41,7 @@ from routes.contact_routes import bp_contact
 from routes.checkout_routes import bp_checkout
 from routes.demo_routes import bp_demo
 from routes.account_routes import bp_account
+from routes.admin_routes import admin_bp
 
 # ===== Solver / Providers / Maintenance =====
 from core.models import Location, TimeWindow, Depot, Vehicle, Stop, OptimizeRequest, hhmm_to_minutes
@@ -48,8 +49,6 @@ from core.providers.maps import RoutingProvider
 from core.solver.vrptw import solve_vrptw
 from core.maintenance.predictor import predict_failure_risk
 from core.telemetry import salvar_telemetria
-from routes.admin_routes import admin_bp
-
 
 # -----------------------------------------------------------------------------
 # App / Config
@@ -58,7 +57,6 @@ load_dotenv()
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret-change-me")
 
-# Cookies permissivos em dev
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=False,
@@ -68,33 +66,110 @@ app.register_blueprint(admin_bp, url_prefix="/admin")
 AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"
 DEFAULT_TRIAL_PLAN = os.getenv("DEFAULT_TRIAL_PLAN", "full")
 DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
-# >>> 15 dias de verdade
+# 15 dias reais
 DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "15"))
+
+_last_audit_time = {}
+# -----------------------------------------------------------------------------
+# SQL helpers (COMPATÍVEIS COM DUCKDB)
+# -----------------------------------------------------------------------------
+def _dialect():
+    """Identifica DuckDB explicitamente"""
+    return "duckdb"  # Já sabemos que é DuckDB
+
+def _sql_now():
+    return "NOW()"
+
+def _sql_date(expr):
+    return f"CAST({expr} AS DATE)"
+
+def _sql_hours_ago(hours:int):
+    return f"NOW() - INTERVAL '{hours} hours'"
+
+def _sql_minutes_ago(minutes:int):
+    return f"NOW() - INTERVAL '{minutes} minutes'"
+
+def _sql_this_week_start():
+    return "CURRENT_DATE - INTERVAL '6 days'"  # Simplificado para DuckDB
+
+def _has_column(conn, table, column):
+    """Verifica se coluna existe (compatível com DuckDB) - CORRIGIDO"""
+    try:
+        result = conn.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = ? AND column_name = ?
+        """, [table.lower(), column.lower()]).fetchone()
+        return result is not None
+    except Exception:
+        return False
+
+# -----------------------------------------------------------------------------
+# Bootstrap admin em DuckDB (CORRIGIDO)
+# -----------------------------------------------------------------------------
+def _bootstrap_duckdb_admin():
+    from core.db import get_conn
+    admin_email = os.getenv("ADMIN_EMAIL")
+    if not admin_email:
+        return
+    try:
+        con = get_conn()
+        # Verifica se coluna is_admin existe
+        has_admin_col = _has_column(con, "users", "is_admin")
+        if not has_admin_col:
+            con.execute("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE")
+        con.execute("UPDATE users SET is_admin = TRUE WHERE email = ?", (admin_email,))
+        con.close()
+    except Exception as e:
+        print(f"[admin bootstrap] erro: {e}")
+
+_bootstrap_duckdb_admin()
 
 # -----------------------------------------------------------------------------
 # Utils / Helpers
 # -----------------------------------------------------------------------------
-def _to_aware_utc(dt):
-    if dt is None:
+def _parse_dt_any(val):
+    """Converte str/naive/aware -> aware UTC. Retorna None se não der."""
+    if val is None:
         return None
-    if isinstance(dt, str):
+    if isinstance(val, datetime):
+        return val.astimezone(timezone.utc) if val.tzinfo else val.replace(tzinfo=timezone.utc)
+    if isinstance(val, (int, float)):
         try:
-            dt = datetime.fromisoformat(dt.replace("Z", "").split(".")[0])
+            return datetime.fromtimestamp(val, tz=timezone.utc)
         except Exception:
             return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    if isinstance(val, str):
+        s = val.strip()
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%Y",
+        ):
+            try:
+                dt = datetime.strptime(s, fmt)
+                return dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+    return None
 
 def _status_of(record, idx_if_tuple=None, key_if_dict="status"):
     """Extrai status robustamente de tupla ou dict."""
     if not record:
         return ""
     try:
-        # dict-like
-        val = record.get(key_if_dict)
-        if val is not None:
-            return str(val).lower()
+        if hasattr(record, "get"):
+            val = record.get(key_if_dict)
+            if val is not None:
+                return str(val).lower()
     except Exception:
         pass
     if idx_if_tuple is not None:
@@ -105,42 +180,34 @@ def _status_of(record, idx_if_tuple=None, key_if_dict="status"):
     return ""
 
 def _trial_status_of(trial):
-    # layout comum: (id, user_id?, plan, vehicles, started_at, trial_end, status)
-    return _status_of(trial, idx_if_tuple=6, key_if_dict="status")
+    return _status_of(trial, idx_if_tuple=5, key_if_dict="status")  # DuckDB: índice 5 para status
 
 def _trial_end_of(trial):
+    """Extrai trial_end de dict ou tupla e padroniza para datetime aware UTC."""
     if not trial:
         return None
-    try:
-        v = trial.get("trial_end")
-        if v:
-            return v
-    except Exception:
-        pass
-    # layouts mais vistos: started_at(4?) trial_end(5?) / started_at(3) trial_end(4)
-    for idx in (5, 4):
+    if hasattr(trial, "get"):
+        end = trial.get("trial_end") or trial.get("end") or trial.get("trialEnd")
+        return _parse_dt_any(end)
+    for idx in (4, 3):  # DuckDB: trial_end no índice 4
         try:
-            return trial[idx]
+            return _parse_dt_any(trial[idx])
         except Exception:
             continue
     return None
 
 def _sub_status_of(sub):
-    # layout típico assinatura: (id, user_id, plan, ..., status)
-    return _status_of(sub, idx_if_tuple=4, key_if_dict="status")
+    return _status_of(sub, idx_if_tuple=4, key_if_dict="status")  # DuckDB: índice 4 para status
 
 def _days_left(trial):
-    """Dias restantes inteiros, arredondando para cima (ceil)."""
-    if not trial:
-        return None
-    end = _to_aware_utc(_trial_end_of(trial))
+    """Dias restantes inteiros (ceil)."""
+    end = _trial_end_of(trial)
     if not end:
         return None
     now = datetime.now(timezone.utc)
     sec = (end - now).total_seconds()
     if sec <= 0:
         return 0
-    # ceil para evitar mostrar '14' no mesmo dia da criação de um trial de 15 dias
     from math import ceil
     return int(ceil(sec / 86400))
 
@@ -160,6 +227,41 @@ def _ensure_trial(user_id: int):
         print(f"[trial] criado para user {user_id}")
     except Exception as e:
         print("[trial] falhou ao criar:", e)
+
+def _parse_maybe_dt(x):
+    """Converte str/None/datetime em datetime timezone-aware (UTC) ou None."""
+    if x is None:
+        return None
+    if isinstance(x, datetime):
+        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+    if isinstance(x, str):
+        s = x.strip().replace("Z", "")
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(s.split(".")[0], fmt)
+                return dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+        try:
+            dt = datetime.fromisoformat(s.split(".")[0])
+            return dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+def _iso_utc(dt):
+    """Retorna ISO8601 em UTC com 'Z' no final, ou ''."""
+    if not dt:
+        return ""
+    if isinstance(dt, str):
+        dt = _parse_maybe_dt(dt)
+    if not dt:
+        return ""
+    if dt.tzinfo:
+        dt = dt.astimezone(timezone.utc)
+    else:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # -----------------------------------------------------------------------------
 # Login / Session
@@ -202,39 +304,88 @@ def inject_globals():
         "days_left": _days_left(trial),
     }
 
+
+# app.py - no before_request, ajuste a chamada:
 @app.before_request
 def _sync_trial_audit_and_expire():
+    """
+    Versão otimizada que evita auditorias muito frequentes para o mesmo usuário.
+    """
     try:
         uid = int(getattr(current_user, "id", 0) or 0)
         if not uid:
             return
+
+        # Rate limiting: máximo 1 auditoria por minuto por usuário
+        current_time = time.time()
+        last_time = _last_audit_time.get(uid, 0)
+        if current_time - last_time < 60:  # 60 segundos
+            return
+
+        _last_audit_time[uid] = current_time
+
         trial = get_active_trial(uid)
         if not trial:
             return
 
-        # expiração automática
-        end = _to_aware_utc(_trial_end_of(trial))
-        if end and end < datetime.now(timezone.utc):
-            try:
-                # tuple layout: id no índice 0
-                tid = trial[0] if not isinstance(trial, dict) else trial.get("id")
-                if tid:
-                    expire_trial(tid)
-            except Exception:
-                pass
-            return
+        # Verifica expiração
+        end = _trial_end_of(trial)
+        if end is not None:
+            now = datetime.now(timezone.utc)
+            if end < now:
+                try:
+                    tid = trial.get("id") if hasattr(trial, "get") else trial[0]
+                    if tid:
+                        expire_trial(tid)
+                        print(f"[trial] expirado para user {uid}")
+                except Exception as e:
+                    print(f"[expire_trial] erro: {e}")
+                return
 
-        # auditoria
-        trial_users_upsert(
-            user_id=uid,
-            email=getattr(current_user, "email", "") or "",
-            nome=None,
-            trial_start=trial[4] if not isinstance(trial, dict) else trial.get("started_at"),
-            trial_end=_trial_end_of(trial),
-            converted=(_trial_status_of(trial) == "converted"),
-        )
+        # Auditoria - apenas dados essenciais
+        trial_start = None
+        if hasattr(trial, "get"):
+            trial_start = _parse_dt_any(trial.get("started_at") or trial.get("start"))
+        else:
+            for idx in (3, 2):
+                try:
+                    trial_start = _parse_dt_any(trial[idx])
+                    break
+                except Exception:
+                    continue
+
+        # Converte para string de forma segura
+        def _safe_isoformat(dt):
+            if not dt:
+                return None
+            if isinstance(dt, str):
+                return dt
+            try:
+                return dt.isoformat()
+            except Exception:
+                return None
+
+        trial_start_str = _safe_isoformat(trial_start)
+        trial_end_str = _safe_isoformat(end)
+        is_converted = (_trial_status_of(trial) == "converted")
+
+        # UPSERT com tratamento silencioso de erro
+        try:
+            trial_users_upsert(
+                user_id=uid,
+                email=(getattr(current_user, "email", "") or ""),
+                nome=None,
+                trial_start=trial_start_str,
+                trial_end=trial_end_str,
+                converted=is_converted,
+            )
+        except Exception as e:
+            # Log silencioso - não polui os logs
+            pass
+
     except Exception as e:
-        print("[before_request][trial_audit] erro:", e)
+        # Log silencioso para erros gerais
+        pass
 
 # -----------------------------------------------------------------------------
 # Infra inicial (tabelas auxiliares)
@@ -246,12 +397,10 @@ with get_conn() as con:
             created_at  TIMESTAMP,
             req_json    TEXT,
             routes_json TEXT,
-            map_url     TEXT
+            map_url     TEXT,
+            path_json   TEXT
         );
     """)
-    cols = {r[1].lower() for r in con.execute("PRAGMA table_info('last_plans')").fetchall()}
-    if "path_json" not in cols:
-        con.execute("ALTER TABLE last_plans ADD COLUMN path_json TEXT;")
 
 # -----------------------------------------------------------------------------
 # Assets / Providers
@@ -299,10 +448,8 @@ def dashboard():
         kpis = {"total_veiculos": 12, "viagens_hoje": 8, "viagens_semana": 43, "alertas": 3}
         return render_template("index.html", hide_paywall=True, kpis=kpis)
 
-    # sem direito → planos
     return redirect(url_for("billing.pricing_page"))
 
-# deixa pública para evitar loop / fricção
 @app.get("/pricing")
 def pricing_alias():
     return redirect(url_for("billing.pricing_page"))
@@ -358,12 +505,29 @@ def demo_page():
 @app.get("/admin/trials")
 @login_required
 def admin_trials():
+    try:
+        uid = int(current_user.id)
+        me = get_user_by_id(uid)
+        is_admin = False
+        if me:
+            # DuckDB retorna boolean para is_admin
+            is_admin = bool(me.get("is_admin")) if hasattr(me, "get") else bool(me["is_admin"])
+        if not is_admin:
+            return "Forbidden", 403
+    except Exception:
+        return "Forbidden", 403
+
     status = (request.args.get("status") or "").strip().lower() or None
     rows = list_trial_users(status=status, limit=500, offset=0)
-    summary = trial_users_summary()
+    summary = trial_users_summary() or {}
 
-    html = ["<h2>Trials (auditoria)</h2>"]
-    html.append("<p>Resumo: " + ", ".join([f"{k}: {v}" for k, v in summary.items()]) + "</p>")
+    html = []
+    html.append("<h2>Trials (auditoria)</h2>")
+    if isinstance(summary, dict):
+        resumo = ", ".join([f"{k}: {v}" for k, v in summary.items()])
+    else:
+        resumo = str(summary)
+    html.append(f"<p>Resumo: {resumo}</p>")
     html.append("""
         <p>Filtrar:
           <a href="/admin/trials">todos</a> |
@@ -372,27 +536,43 @@ def admin_trials():
           <a href="/admin/trials?status=convertido">convertidos</a>
         </p>
     """)
-    html.append("<table border=1 cellspacing=0 cellpadding=6>")
+    html.append('<table border="1" cellspacing="0" cellpadding="6">')
     html.append("<tr><th>User ID</th><th>Email</th><th>Nome</th><th>Início</th><th>Fim</th><th>Status</th><th>Atualizado</th></tr>")
-    for r in rows:
-        user_id, email, nome, ts, te, st, upd = r
+
+    for r in rows or []:
+        if hasattr(r, "get"):
+            user_id = r.get("user_id")
+            email = r.get("email")
+            nome = r.get("nome") or ""
+            ts = r.get("trial_start")
+            te = r.get("trial_end")
+            st = r.get("status")
+            upd = r.get("updated_at") or r.get("updated")
+        else:
+            user_id, email, nome, ts, te, st, upd = (list(r) + [None]*7)[:7]
+
         html.append(
             f"<tr><td>{user_id}</td><td>{email}</td><td>{nome or ''}</td>"
             f"<td>{ts}</td><td>{te}</td><td>{st}</td><td>{upd}</td></tr>"
         )
+
     html.append("</table>")
     return "".join(html)
 
 @app.get("/admin/trials/backfill")
 @login_required
 def admin_trials_backfill():
-    if int(current_user.id) != 1:
+    try:
+        if int(current_user.id) != 1:
+            return "Forbidden", 403
+    except Exception:
         return "Forbidden", 403
+
     trial_users_backfill_from_trials()
     return redirect(url_for("admin_trials"))
 
 # -----------------------------------------------------------------------------
-# KPIs (defensivo)
+# KPIs (compatível com DuckDB)
 # -----------------------------------------------------------------------------
 @app.get("/api/kpis")
 @login_required
@@ -401,23 +581,25 @@ def api_kpis():
     try:
         conn = get_conn()
 
+        # total_veiculos nos últimos 5 min
         try:
-            out["total_veiculos"] = conn.execute("""
+            out["total_veiculos"] = conn.execute(f"""
                 SELECT COUNT(DISTINCT vehicle_id)
                 FROM telemetry
-                WHERE timestamp >= NOW() - INTERVAL 5 MINUTE
+                WHERE timestamp >= {_sql_minutes_ago(5)}
             """).fetchone()[0] or 0
         except Exception:
             pass
 
         desloc_thresh = 0.01
 
+        # viagens_hoje (>= 20 pontos e deslocamento mínimo)
         try:
             out["viagens_hoje"] = conn.execute(f"""
                 SELECT COUNT(*) FROM (
                   SELECT vehicle_id
                   FROM telemetry
-                  WHERE CAST(timestamp AS DATE) = CURRENT_DATE
+                  WHERE {_sql_date("timestamp")} = {_sql_date("CURRENT_TIMESTAMP")}
                   GROUP BY vehicle_id
                   HAVING COUNT(*) >= 20
                      AND ( (MAX(lat)-MIN(lat)) + (MAX(lon)-MIN(lon)) ) > {desloc_thresh}
@@ -426,16 +608,13 @@ def api_kpis():
         except Exception:
             pass
 
+        # viagens_semana ~ últimos 7 dias
         try:
             out["viagens_semana"] = conn.execute(f"""
-                WITH base AS (
-                  SELECT *
-                  FROM telemetry
-                  WHERE CAST(timestamp AS DATE) >= DATE_TRUNC('week', CURRENT_DATE)
-                )
                 SELECT COUNT(*) FROM (
                   SELECT vehicle_id
-                  FROM base
+                  FROM telemetry
+                  WHERE {_sql_date("timestamp")} >= {_sql_this_week_start()}
                   GROUP BY vehicle_id
                   HAVING COUNT(*) >= 60
                      AND ( (MAX(lat)-MIN(lat)) + (MAX(lon)-MIN(lon)) ) > {desloc_thresh}
@@ -444,12 +623,13 @@ def api_kpis():
         except Exception:
             pass
 
+        # alertas: overspeed na última hora
         try:
-            cols = {r[1].lower() for r in conn.execute("PRAGMA table_info('telemetry')").fetchall()}
-            if "speed" in cols:
-                out["alertas"] = conn.execute("""
-                    SELECT COUNT(*) FROM telemetry
-                    WHERE timestamp >= NOW() - INTERVAL 1 HOUR
+            if _has_column(conn, "telemetry", "speed"):
+                out["alertas"] = conn.execute(f"""
+                    SELECT COUNT(*)
+                    FROM telemetry
+                    WHERE timestamp >= {_sql_minutes_ago(60)}
                       AND COALESCE(speed, 0) > 100
                 """).fetchone()[0] or 0
         except Exception:
@@ -460,7 +640,7 @@ def api_kpis():
     return jsonify(out)
 
 # -----------------------------------------------------------------------------
-# Telemetria (APIs)
+# Telemetria (APIs) — consultas compatíveis com DuckDB
 # -----------------------------------------------------------------------------
 @app.get("/api/telemetry")
 @login_required
@@ -491,22 +671,22 @@ def _turn_delta(a, b):
 def _fetch_points(hours:int, vehicle_id:str|None=None, limit:int=20000):
     conn = get_conn()
     if vehicle_id:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT vehicle_id, lat, lon, timestamp AS ts, COALESCE(speed,0) AS speed
             FROM telemetry
-            WHERE timestamp >= NOW() - INTERVAL ? HOUR
+            WHERE timestamp >= {_sql_hours_ago(hours)}
               AND vehicle_id = ?
             ORDER BY ts
             LIMIT ?
-        """, [hours, vehicle_id, limit]).fetchall()
+        """, [vehicle_id, limit]).fetchall()
     else:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT vehicle_id, lat, lon, timestamp AS ts, COALESCE(speed,0) AS speed
             FROM telemetry
-            WHERE timestamp >= NOW() - INTERVAL ? HOUR
+            WHERE timestamp >= {_sql_hours_ago(hours)}
             ORDER BY vehicle_id, ts
             LIMIT ?
-        """, [hours, limit]).fetchall()
+        """, [limit]).fetchall()
 
     pts = []
     for r in rows:
@@ -532,6 +712,7 @@ def _detect_events(points, overspeed_kmh=100, stop_speed_kmh=3, stop_min_minutes
     for vid, group in groupby(points, key=lambda x: x["vehicle_id"]):
         g = list(group)
 
+        # overspeed
         for p in g:
             if p["speed"] > overspeed_kmh:
                 events.append({
@@ -540,6 +721,7 @@ def _detect_events(points, overspeed_kmh=100, stop_speed_kmh=3, stop_min_minutes
                     "value": p["speed"]
                 })
 
+        # paradas
         start_idx = None
         for i, p in enumerate(g):
             if p["speed"] < stop_speed_kmh:
@@ -578,6 +760,7 @@ def _detect_events(points, overspeed_kmh=100, stop_speed_kmh=3, stop_min_minutes
                     "minutes": round(mins, 1)
                 })
 
+        # curvas bruscas
         for i in range(1, len(g)):
             a, b = g[i-1], g[i]
             try:
@@ -641,6 +824,16 @@ def api_telemetry_events():
     except Exception as e:
         print("[offroute] falha ao carregar path_json:", e)
 
+    # Função auxiliar para calcular distância ponto-linha
+    def _point_to_linestring_km(point, line):
+        min_dist = float('inf')
+        for i in range(len(line)-1):
+            a = line[i]
+            b = line[i+1]
+            dist = _haversine_km(point[0], point[1], a[0], a[1])
+            min_dist = min(min_dist, dist)
+        return min_dist
+
     if paths_by_vehicle:
         for p in pts:
             v = p["vehicle_id"]
@@ -671,14 +864,14 @@ def api_telemetry_series():
         return jsonify([])
 
     conn = get_conn()
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT timestamp AS ts, COALESCE(speed, 0) AS speed
         FROM telemetry
         WHERE vehicle_id = ?
-          AND timestamp >= NOW() - INTERVAL ? HOUR
+          AND timestamp >= {_sql_hours_ago(hours)}
         ORDER BY ts
         LIMIT 20000
-    """, [vid, hours]).fetchall()
+    """, [vid]).fetchall()
 
     out = []
     for ts, spd in rows:
@@ -1128,13 +1321,20 @@ app.register_blueprint(bp_account)
 # -----------------------------------------------------------------------------
 # Run (dev)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Run (compatível com Render)
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Run (compatível com Render)
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)
+    # NO RENDER: use a porta da variável de ambiente PORT
+    port = int(os.environ.get("PORT", 10000))  # Render usa PORT, fallback 10000
+    # NO RENDER: sempre use 0.0.0.0
+    host = "0.0.0.0"
 
-
-
-
+    print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
+    app.run(host=host, port=port, debug=False)
 
 
 

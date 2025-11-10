@@ -1,18 +1,19 @@
-# core/db_connection.py
+# core/db_connection.py (se você tiver este arquivo)
+import duckdb
+from pathlib import Path
 import os
-import sqlite3
-from flask import g
 
-# caminho padrão do banco (mude se usar Postgres no Render)
-DB_PATH = os.getenv("DB_PATH", "opti_fleet.db")
+DB_PATH = Path(os.getenv("DUCKDB_PATH", "data/optifleet.duckdb"))
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-    return g.db
+def get_conn():
+    """Conexão DuckDB com configurações para evitar conflitos"""
+    conn = duckdb.connect(str(DB_PATH))
+    # Configurações para melhor performance e evitar conflitos
+    conn.execute("PRAGMA threads=1")  # Reduz concorrência
+    conn.execute("PRAGMA enable_progress_bar=false")
+    return conn
 
-def close_db(e=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+def close_db():
+    """Fecha conexão se necessário"""
+    pass  # DuckDB gerencia automaticamente

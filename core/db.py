@@ -5,12 +5,14 @@ from datetime import datetime, timedelta, timezone
 import duckdb
 import secrets
 import os
-
+import json
+import time
+import random
 
 # =========================
 # Config / Conexão
 # =========================
-DB_PATH = Path("data.duckdb")
+DB_PATH = Path(os.getenv("DUCKDB_PATH", "data/optifleet.duckdb"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 def get_conn():
@@ -22,8 +24,6 @@ def get_conn():
 # =========================
 def _init_schema():
     con = get_conn()
-
-
 
     # Usuários
     con.execute("""
@@ -98,7 +98,7 @@ def _init_schema():
     );
     """)
 
-    # Trials
+    # Trials (controle de direito de uso)
     con.execute("""
     CREATE TABLE IF NOT EXISTS trials (
       id INTEGER,
@@ -125,36 +125,37 @@ def _init_schema():
     );
     """)
 
+    # Trackers
+    con.execute("""
+    CREATE TABLE IF NOT EXISTS trackers (
+      id            INTEGER PRIMARY KEY,
+      client_id     INTEGER,
+      tracker_id    TEXT,                 -- identificador lógico (pode ser = IMEI)
+      secret_token  TEXT,                 -- token para autenticar ingestão
+      vehicle_id    TEXT,
+      imei          TEXT,                 -- IMEI (único se presente)
+      vendor        TEXT,                 -- fabricante (opcional)
+      status        TEXT DEFAULT 'active',
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
 
+    # Auditoria de Trials
     con.execute("""
-         CREATE TABLE IF NOT EXISTS trackers (
-              id            INTEGER PRIMARY KEY,
-              client_id     INTEGER,
-              tracker_id    TEXT,                 -- identificador lógico (pode ser = IMEI)
-              secret_token  TEXT,                 -- token para autenticar ingestão
-              vehicle_id    TEXT,
-              imei          TEXT,                 -- IMEI (único se presente)
-              vendor        TEXT,                 -- fabricante (opcional)
-              status        TEXT DEFAULT 'active',
-              created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-    # Trial Users (auditoria de testes) — DuckDB friendly
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS trial_users (
-                id              INTEGER,
-                user_id         INTEGER NOT NULL,
-                email           TEXT NOT NULL,
-                nome            TEXT,
-                trial_start     TIMESTAMP NOT NULL,
-                trial_end       TIMESTAMP NOT NULL,
-                status          TEXT DEFAULT 'ativo',   -- 'ativo' | 'expirado' | 'convertido'
-                converted       BOOLEAN DEFAULT FALSE,
-                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (id)
-            );
-        """)
+    CREATE TABLE IF NOT EXISTS trial_users (
+      id              INTEGER,
+      user_id         INTEGER NOT NULL,
+      email           TEXT NOT NULL,
+      nome            TEXT,
+      trial_start     TIMESTAMP NOT NULL,
+      trial_end       TIMESTAMP NOT NULL,
+      status          TEXT DEFAULT 'ativo',   -- 'ativo' | 'expirado' | 'convertido'
+      converted       BOOLEAN DEFAULT FALSE,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    );
+    """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_trial_users_user ON trial_users(user_id);")
     con.execute("CREATE INDEX IF NOT EXISTS idx_trial_users_status ON trial_users(status);")
 
@@ -170,16 +171,10 @@ def _init_schema():
     _ensure_col("trackers", "secret_token", "ALTER TABLE trackers ADD COLUMN secret_token TEXT;")
     _ensure_col("trackers", "status", "ALTER TABLE trackers ADD COLUMN status TEXT DEFAULT 'active';")
     _ensure_col("trackers", "vendor", "ALTER TABLE trackers ADD COLUMN vendor TEXT;")
-
-    # após criar trial_users:
     _ensure_col("trial_users", "converted", "ALTER TABLE trial_users ADD COLUMN converted BOOLEAN DEFAULT FALSE;")
 
-    con.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS ux_trackers_imei
-            ON trackers(imei);
-        """)
-
-    # Índices úteis (os seus já existentes)
+    # Índices úteis
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_trackers_imei ON trackers(imei);")
     con.execute("CREATE INDEX IF NOT EXISTS idx_tel_client_ts ON telemetry(client_id, timestamp);")
     con.execute("CREATE INDEX IF NOT EXISTS idx_tel_client_vid_ts ON telemetry(client_id, vehicle_id, timestamp);")
     con.execute("CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id);")
@@ -317,7 +312,6 @@ def list_vehicles(client_id: int, q: Optional[str]=None, only: Optional[str]=Non
     con.close()
     return rows
 
-
 def get_vehicle(client_id: int, vehicle_id: str):
     con = get_conn()
     r = con.execute("SELECT * FROM vehicles WHERE client_id=? AND id=?", [client_id, vehicle_id]).fetchone()
@@ -438,14 +432,6 @@ def get_tracker_owner(tracker_id: str, token: str):
 
 # ---- SHIM de compatibilidade com versões antigas ----
 def upsert_tracker(client_id: int, imei: str, secret_token: str, vehicle_id: str | None = None) -> None:
-    """
-    Compat: versões antigas chamavam upsert_tracker(client_id, imei, secret_token, vehicle_id)
-    No schema novo, usamos tracker_id (string arbitrária). Aqui mapeamos imei -> tracker_id.
-    - Cria se não existir
-    - Atualiza secret_token se mudar
-    - Opcionalmente vincula vehicle_id
-    """
-    # garante existência
     row = tracker_get(client_id, imei)  # imei como tracker_id
     if not row:
         con = get_conn()
@@ -456,7 +442,6 @@ def upsert_tracker(client_id: int, imei: str, secret_token: str, vehicle_id: str
         con.close()
         return
 
-    # já existe: atualiza token e vínculo se necessário
     con = get_conn()
     if vehicle_id:
         con.execute("""
@@ -469,7 +454,6 @@ def upsert_tracker(client_id: int, imei: str, secret_token: str, vehicle_id: str
           WHERE client_id=? AND tracker_id=?
         """, [secret_token, imei, client_id, imei])
     con.close()
-
 
 # =========================
 # Telemetria
@@ -557,13 +541,8 @@ def get_subscription_by_provider_ref(provider_ref: str):
     con.close()
     return row
 
-# --- REMOVA esta linha do topo do db.py ---
-# from core.db_connection import get_db
-
-# ... restante do arquivo igual ...
-
 def get_latest_subscription_for_user(user_id: int):
-    """Retorna a assinatura mais recente do usuário (via DuckDB, sem db_connection)."""
+    """Retorna a assinatura mais recente do usuário (via DuckDB)."""
     con = get_conn()
     row = con.execute("""
         SELECT id, user_id, plan, billing, vehicles, status,
@@ -589,104 +568,10 @@ def get_latest_subscription_for_user(user_id: int):
         "provider_ref": row[9],
     }
 
-
-
-
 # =========================
-# Trials
+# Trials (direito de uso)
 # =========================
-
-def list_trial_users(status: Optional[str] = None, q: Optional[str] = None,
-                     page: int = 1, per_page: int = 50) -> List[Tuple]:
-    """
-    Retorna (trial_id, user_id, email, started_at, ends_at, status)
-    status é 'active' ou 'expired'
-    """
-    offset = (page - 1) * per_page
-    params = {}
-    where = []
-    # status opcional
-    if status == "active":
-        where.append("t.ends_at >= NOW()")
-    elif status == "expired":
-        where.append("t.ends_at < NOW()")
-    # busca opcional por email
-    if q:
-        where.append("u.email ILIKE %(q)s")
-        params["q"] = f"%{q}%"
-
-    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-
-    sql = f"""
-        SELECT
-            t.id, t.user_id, u.email, t.started_at, t.ends_at,
-            CASE WHEN t.ends_at >= NOW() THEN 'active' ELSE 'expired' END AS status
-        FROM trials t
-        JOIN users u ON u.id = t.user_id
-        {where_sql}
-        ORDER BY t.ends_at DESC
-        LIMIT %(per_page)s OFFSET %(offset)s
-    """
-    params.update({"per_page": per_page, "offset": offset})
-
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(sql, params)
-        return cur.fetchall()
-
-def trial_users_summary() -> Dict[str, int]:
-    """
-    Retorna {'ativos': X, 'expirados': Y, 'proximos_de_expirar': Z}
-    proximos_de_expirar = ends_at entre agora e 3 dias
-    """
-    sql = """
-        SELECT
-          COUNT(*) FILTER (WHERE ends_at >= NOW()) AS ativos,
-          COUNT(*) FILTER (WHERE ends_at < NOW()) AS expirados,
-          COUNT(*) FILTER (
-            WHERE ends_at BETWEEN NOW() AND NOW() + INTERVAL '3 days'
-          ) AS proximos_de_expirar
-        FROM trials
-    """
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(sql)
-        row = cur.fetchone()
-        return {
-            "ativos": row[0] or 0,
-            "expirados": row[1] or 0,
-            "proximos_de_expirar": row[2] or 0,
-        }
-def trial_users_upsert(user_id:int, email:str, nome:str|None, trial_start, trial_end, converted:bool):
-    with get_conn() as con:
-        # gera id sequencial opcional
-        tid = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM trial_users").fetchone()[0]
-        # tenta encontrar registro atual do usuário
-        row = con.execute("""
-            SELECT id FROM trial_users WHERE user_id = ?
-        """, [user_id]).fetchone()
-        if row:
-            con.execute("""
-                UPDATE trial_users
-                   SET email=?, nome=?, trial_start=?, trial_end=?, 
-                       status = CASE 
-                                  WHEN ? THEN 'convertido' 
-                                  ELSE 'ativo' 
-                                END,
-                       converted=?, updated_at=CURRENT_TIMESTAMP
-                 WHERE user_id=?
-            """, [email, nome, trial_start, trial_end, converted, converted, user_id])
-        else:
-            con.execute("""
-                INSERT INTO trial_users
-                  (id, user_id, email, nome, trial_start, trial_end, status, converted, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """, [tid, user_id, email, nome, trial_start, trial_end, 'convertido' if converted else 'ativo', converted])
-
-def expire_trial(trial_id: int) -> None:
-    """Força o fim do trial (seta ends_at = NOW())"""
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE trials SET ends_at = NOW() WHERE id = %s", (trial_id,))
-        conn.commit()
-def create_trial(user_id: int, plan: str, vehicles: int, days: int = 14) -> int:
+def create_trial(user_id: int, plan: str, vehicles: int, days: int = 15) -> int:
     trial_id = _next_id("trials")
     now = datetime.now(timezone.utc)
     end = now + timedelta(days=days)
@@ -704,13 +589,21 @@ def get_active_trial(user_id: int):
       SELECT id, plan, vehicles, started_at, trial_end, status
       FROM trials
       WHERE user_id = ? AND status = 'active'
+        AND trial_end >= CURRENT_TIMESTAMP
       ORDER BY trial_end DESC
       LIMIT 1
     """, [user_id]).fetchone()
     con.close()
     return row
 
-
+def expire_trial(trial_id: int) -> None:
+    con = get_conn()
+    con.execute("""
+        UPDATE trials
+        SET status = 'expired', trial_end = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, [trial_id])
+    con.close()
 
 def mark_trial_converted(trial_id: int):
     con = get_conn()
@@ -720,107 +613,102 @@ def mark_trial_converted(trial_id: int):
 # =========================
 # Trial Users (auditoria)
 # =========================
-def _status_from_dates(start: datetime, end: datetime, converted: bool = False) -> str:
-    if converted:
-        return "convertido"
-    now = datetime.now(timezone.utc)
-    return "ativo" if now <= end else "expirado"
-
-# core/db.py (trechos essenciais)
-
-
-
-def list_trial_users(
-    as_admin: bool,
-    user_id: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> List[Dict]:
+# core/db.py (apenas a função problemática corrigida)
+# core/db.py - função trial_users_upsert corrigida
+def trial_users_upsert(user_id: int, email: str, nome: str | None, trial_start, trial_end, converted: bool):
     """
-    Se as_admin=True -> retorna todos os trials (paginado).
-    Senão -> retorna apenas do user_id.
+    UPSERT com retry automático para evitar conflitos de transação no DuckDB.
     """
-    with engine.connect() as conn:
-        if as_admin:
-            q = text("""
-                SELECT t.id, t.user_id, u.email, u.name,
-                       t.started_at, t.expires_at,
-                       CASE WHEN NOW() > t.expires_at THEN 0
-                            ELSE EXTRACT(EPOCH FROM (t.expires_at - NOW()))/86400
-                       END AS days_left
-                FROM trials t
-                JOIN users u ON u.id = t.user_id
-                ORDER BY t.started_at DESC
-                LIMIT :limit OFFSET :offset
-            """)
-            rows = conn.execute(q, {"limit": limit, "offset": offset}).mappings().all()
-        else:
-            if not user_id:
-                return []
-            q = text("""
-                SELECT t.id, t.user_id, u.email, u.name,
-                       t.started_at, t.expires_at,
-                       CASE WHEN NOW() > t.expires_at THEN 0
-                            ELSE EXTRACT(EPOCH FROM (t.expires_at - NOW()))/86400
-                       END AS days_left
-                FROM trials t
-                JOIN users u ON u.id = t.user_id
-                WHERE t.user_id = :user_id
-                ORDER BY t.started_at DESC
-                LIMIT :limit OFFSET :offset
-            """)
-            rows = conn.execute(q, {"user_id": user_id, "limit": limit, "offset": offset}).mappings().all()
-    # arredonda days_left pra cima (quem tem 0.3 dia ainda tem hoje)
-    for r in rows:
-        r["days_left"] = int(max(0, (r["days_left"] or 0) + 0.999))
+    max_retries = 3
+    base_delay = 0.1  # 100ms
+
+    for attempt in range(max_retries):
+        try:
+            con = get_conn()
+
+            # Lógica de status simplificada
+            status = 'convertido' if converted else 'ativo'
+
+            # Usar uma única operação SQL para evitar conflitos
+            # Primeiro tenta UPDATE, se não afetar linhas, faz INSERT
+            result = con.execute("""
+                UPDATE trial_users 
+                SET email=?, nome=?, trial_start=?, trial_end=?, 
+                    status=?, converted=?, updated_at=CURRENT_TIMESTAMP
+                WHERE user_id=?
+            """, [email, nome, trial_start, trial_end, status, converted, user_id])
+
+            rows_updated = result.fetchone()[0]
+
+            if rows_updated == 0:
+                # Nenhuma linha atualizada, faz INSERT
+                tid = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM trial_users").fetchone()[0]
+                con.execute("""
+                    INSERT INTO trial_users
+                    (id, user_id, email, nome, trial_start, trial_end, status, converted, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """, [tid, user_id, email, nome, trial_start, trial_end, status, converted])
+
+            con.close()
+            return  # Sucesso, sai da função
+
+        except Exception as e:
+            con.close()  # Fecha conexão em caso de erro
+            if attempt < max_retries - 1:
+                # Espera exponencial com jitter antes de retry
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
+                print(f"[trial_users_upsert] tentativa {attempt + 1} falhou, retry em {delay:.2f}s: {e}")
+                time.sleep(delay)
+            else:
+                print(f"[trial_users_upsert] todas as {max_retries} tentativas falharam: {e}")
+                # Não propaga a exceção para não quebrar o request
+def list_trial_users(status: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[Tuple]:
+    """
+    Retorna tuplas: (user_id, email, nome, trial_start, trial_end, status, updated_at)
+    Aceita status em {'ativo','expirado','convertido'} ou None.
+    """
+    con = get_conn()
+    base = """
+      SELECT user_id, email, nome, trial_start, trial_end, status, updated_at
+      FROM trial_users
+      WHERE 1=1
+    """
+    args: List[Any] = []
+    if status in ("ativo", "expirado", "convertido"):
+        base += " AND status = ?"
+        args.append(status)
+    base += " ORDER BY trial_end DESC, updated_at DESC LIMIT ? OFFSET ?"
+    args += [int(limit), int(offset)]
+    rows = con.execute(base, args).fetchall()
+    con.close()
     return rows
 
-def trial_users_summary(as_admin: bool, user_id: Optional[str] = None) -> Dict:
-    with engine.connect() as conn:
-        base = """
-            FROM trials t
-            WHERE 1=1
-        """
-        params = {}
-        if not as_admin:
-            base += " AND t.user_id = :user_id"
-            params["user_id"] = user_id
-
-        total = conn.execute(text(f"SELECT COUNT(*) {base}"), params).scalar() or 0
-        ativos = conn.execute(text(f"SELECT COUNT(*) {base} AND NOW() <= t.expires_at"), params).scalar() or 0
-        expirados = total - ativos
-        return {"total": total, "ativos": ativos, "expirados": expirados}
-
-def get_latest_trial_for_user(user_id: int):
-    """Último trial do usuário (ativo ou não)."""
+def trial_users_summary() -> Dict[str, int]:
+    """
+    Retorna {'ativos': X, 'expirados': Y, 'convertidos': Z}
+    """
     con = get_conn()
-    row = con.execute("""
-        SELECT id, user_id, email, nome, trial_start, trial_end, status, created_at, updated_at
-        FROM trial_users
-        WHERE user_id = ?
-        ORDER BY trial_end DESC
-        LIMIT 1
-    """, [user_id]).fetchone()
+    rows = con.execute("""
+        SELECT status, COUNT(*) FROM trial_users
+        GROUP BY status
+    """).fetchall()
     con.close()
-    return row
+    out = {"ativos": 0, "expirados": 0, "convertidos": 0}
+    for st, n in rows:
+        s = (st or "").lower()
+        if s.startswith("ativo"):
+            out["ativos"] += n or 0
+        elif s.startswith("expirado"):
+            out["expirados"] += n or 0
+        elif s.startswith("convertido"):
+            out["convertidos"] += n or 0
+    return out
 
-
-
-def mark_trial_converted_by_user(user_id: int):
-    """Conveniente p/ quando o usuário assina e converte o trial."""
-    con = get_conn()
-    con.execute("""
-        UPDATE trial_users
-           SET status = 'convertido', updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = ? AND status <> 'convertido'
-    """, [user_id])
-    con.close()
 def trial_users_backfill_from_trials():
     """
     Copia dados da tabela trials -> trial_users (apenas quem ainda não está em trial_users).
     """
     with get_conn() as con:
-        # ponto de partida para o id sequencial
         start_id = con.execute("SELECT COALESCE(MAX(id), 0) FROM trial_users").fetchone()[0] or 0
         con.execute(f"""
             INSERT INTO trial_users (id, user_id, email, nome, trial_start, trial_end, status, converted, created_at, updated_at)
@@ -844,7 +732,6 @@ def trial_users_backfill_from_trials():
                 SELECT 1 FROM trial_users tu WHERE tu.user_id = t.user_id
             );
         """)
-
 
 # =========================
 # Contatos
