@@ -380,27 +380,49 @@ def tracker_get_or_create(client_id: int, tracker_id: str):
     con.close()
     return tracker_get(client_id, tracker_id)
 
+# No core/db.py, na função tracker_bind_vehicle, substitua por:
+
 def tracker_bind_vehicle(client_id: int, tracker_id: str, vehicle_id: str, force: bool = False):
-    con = get_conn()
-    row = con.execute("""
-      SELECT vehicle_id FROM trackers WHERE client_id=? AND tracker_id=?
-    """, [client_id, tracker_id]).fetchone()
-    if not row:
-        token = _gen_token()
-        con.execute("""
-          INSERT INTO trackers (client_id, tracker_id, secret_token, vehicle_id, status)
-          VALUES (?,?,?,?, 'active')
-        """, [client_id, tracker_id, token, vehicle_id])
-    else:
-        current = row[0]
-        if current and current != vehicle_id and not force:
+    """Vincula um tracker a um veículo - VERSÃO CORRIGIDA"""
+    try:
+        con = get_conn()
+        
+        # Verifica se o tracker existe
+        existing = con.execute("""
+            SELECT id, vehicle_id FROM trackers 
+            WHERE client_id=? AND tracker_id=?
+        """, [client_id, tracker_id]).fetchone()
+        
+        if existing:
+            tracker_db_id, current_vehicle = existing
+            # Se já está vinculado a outro veículo e não é force, retorna erro
+            if current_vehicle and current_vehicle != vehicle_id and not force:
+                con.close()
+                return False
+            
+            # Atualiza o vínculo
+            con.execute("""
+                UPDATE trackers SET vehicle_id=?
+                WHERE id=?
+            """, [vehicle_id, tracker_db_id])
+        else:
+            # Cria novo tracker se não existir - GERA ID CORRETAMENTE
+            next_id = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM trackers").fetchone()[0]
+            token = _gen_token()
+            con.execute("""
+                INSERT INTO trackers 
+                (id, client_id, tracker_id, secret_token, vehicle_id, imei, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'active')
+            """, [next_id, client_id, tracker_id, token, vehicle_id, tracker_id])
+        
+        con.close()
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] tracker_bind_vehicle: {e}")
+        if con:
             con.close()
-            return False
-        con.execute("""
-          UPDATE trackers SET vehicle_id=? WHERE client_id=? AND tracker_id=?
-        """, [vehicle_id, client_id, tracker_id])
-    con.close()
-    return True
+        return False
 
 def tracker_unbind_vehicle(client_id: int, vehicle_id: str):
     con = get_conn()
@@ -746,4 +768,5 @@ def contact_save(name: str, email: str, company: str, message: str):
     """, [cid, name, email, company, message, now])
     con.close()
     return cid
+
 
