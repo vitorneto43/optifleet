@@ -4,199 +4,207 @@ from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+import traceback
 
-from core.db import get_conn  # DuckDB connection
+from core.db import (
+    get_conn,
+    upsert_vehicle,
+    list_vehicles,
+    delete_vehicle,
+    tracker_bind_vehicle,
+)
 
 bp_fleet = Blueprint("fleet", __name__, url_prefix="/api/fleet")
+
 
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
 def _client_id() -> int:
-    # se você tiver multi-tenant por client_id na tabela vehicles, adapte aqui.
-    # no schema atual, vehicles.id é global e não há client_id explícito — então
-    # ignoramos no SQL. Mantive a função por compatibilidade.
     return int(getattr(current_user, "id", 0) or 0)
 
-def _rows_to_dicts(conn, rows):
-    cols = [c[0] for c in conn.description]  # duckdb: disponível após execute()
-    out = []
-    for r in rows:
-        d = {}
-        for k, v in zip(cols, r):
-            d[k] = v
-        out.append(d)
-    return out
 
 def _validate_imei(imei: str) -> bool:
     return imei.isdigit() and len(imei) == 15
 
-def _merge_vehicle(data: Dict[str, Any]) -> None:
-    """
-    Upsert de vehicle via MERGE no DuckDB.
-    Campos aceitos: id, name, plate, driver, capacity, status,
-    next_service_km, last_service_km, tags, notes, obd_id
-    """
-    with get_conn() as con:
-        # normaliza defaults
-        record = {
-            "id": str(data.get("id", "")).strip(),
-            "name": (data.get("name") or "").strip() or None,
-            "plate": (data.get("plate") or "").strip() or None,
-            "driver": (data.get("driver") or "").strip() or None,
-            "capacity": int(data.get("capacity") or 0),
-            "status": (data.get("status") or "offline"),
-            "next_service_km": float(data.get("next_service_km") or 0),
-            "last_service_km": float(data.get("last_service_km") or 0),
-            "tags": (data.get("tags") or "").strip() or None,
-            "notes": (data.get("notes") or "").strip() or None,
-            "obd_id": (data.get("obd_id") or "").strip() or None,
-        }
-        if not record["id"]:
-            raise ValueError("missing_id")
 
-        # Garante tabela vehicles (idempotente)
-        con.execute("""
-          CREATE TABLE IF NOT EXISTS vehicles (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            plate TEXT,
-            driver TEXT,
-            capacity INTEGER,
-            status TEXT,
-            next_service_km DOUBLE,
-            last_service_km DOUBLE,
-            tags TEXT,
-            notes TEXT,
-            obd_id TEXT
-          );
-        """)
+def _ok(payload: dict, code: int = 200):
+    return jsonify(payload), code
 
-        # MERGE
-        con.execute("""
-          MERGE INTO vehicles AS v
-          USING (
-            SELECT ?::TEXT AS id,
-                   ?::TEXT AS name,
-                   ?::TEXT AS plate,
-                   ?::TEXT AS driver,
-                   ?::INTEGER AS capacity,
-                   ?::TEXT AS status,
-                   ?::DOUBLE AS next_service_km,
-                   ?::DOUBLE AS last_service_km,
-                   ?::TEXT AS tags,
-                   ?::TEXT AS notes,
-                   ?::TEXT AS obd_id
-          ) AS s
-          ON v.id = s.id
-          WHEN MATCHED THEN UPDATE SET
-            name = s.name,
-            plate = s.plate,
-            driver = s.driver,
-            capacity = s.capacity,
-            status = s.status,
-            next_service_km = s.next_service_km,
-            last_service_km = s.last_service_km,
-            tags = s.tags,
-            notes = s.notes,
-            obd_id = s.obd_id
-          WHEN NOT MATCHED THEN
-            INSERT (id, name, plate, driver, capacity, status, next_service_km, last_service_km, tags, notes, obd_id)
-            VALUES (s.id, s.name, s.plate, s.driver, s.capacity, s.status, s.next_service_km, s.last_service_km, s.tags, s.notes, s.obd_id);
-        """, [
-            record["id"], record["name"], record["plate"], record["driver"],
-            record["capacity"], record["status"], record["next_service_km"],
-            record["last_service_km"], record["tags"], record["notes"], record["obd_id"]
-        ])
 
-def _merge_tracker_for_vehicle(vehicle_id: str, imei: str | None, vendor: str | None) -> None:
-    # garante tabela trackers
-    with get_conn() as con:
-        con.execute("""
-          CREATE TABLE IF NOT EXISTS trackers (
-            id         INTEGER PRIMARY KEY,
-            vehicle_id TEXT,
-            imei       TEXT NOT NULL UNIQUE,
-            vendor     TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-        """)
+def _err(msg: str, code: int = 400):
+    return jsonify({"error": msg}), code
 
-        if imei:
-            # upsert do tracker por IMEI e vincula ao vehicle_id
-            con.execute("""
-              MERGE INTO trackers AS t
-              USING (
-                SELECT ?::TEXT AS imei,
-                       ?::TEXT AS vendor,
-                       ?::TEXT AS vehicle_id
-              ) AS s
-              ON t.imei = s.imei
-              WHEN MATCHED THEN
-                UPDATE SET vendor = s.vendor, vehicle_id = s.vehicle_id
-              WHEN NOT MATCHED THEN
-                INSERT (imei, vendor, vehicle_id)
-                VALUES (s.imei, s.vendor, s.vehicle_id);
-            """, [imei, vendor, vehicle_id])
+
+# Campos permitidos para update parcial no veículo (tabela vehicles)
+_ALLOWED_FIELDS = {
+    "name",
+    "plate",
+    "driver",
+    "capacity",
+    "status",
+    "tags",
+    "obd_id",
+    "notes",
+    "last_service_km",
+    "last_service_date",
+    "next_service_km",
+}
+
+
+def _sanitize_vehicle_update(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Filtra somente os campos aceitos e ajusta formatos básicos."""
+    out: Dict[str, Any] = {}
+
+    for k, v in (data or {}).items():
+        if k not in _ALLOWED_FIELDS:
+            continue
+
+        if k in {"capacity", "last_service_km", "next_service_km"}:
+            # aceita string numérica
+            try:
+                out[k] = int(v) if v is not None else None
+            except Exception:
+                continue
+        elif k in {"last_service_date"}:
+            # aceita YYYY-MM-DD ou datetime; guarda como string padrão ISO date
+            if v:
+                try:
+                    if isinstance(v, str):
+                        out[k] = v  # confia que já veio no padrão 'YYYY-MM-DD'
+                    else:
+                        out[k] = str(v)
+                except Exception:
+                    continue
         else:
-            # se IMEI vazio: opcional — desvincular qualquer tracker do veículo
-            con.execute("UPDATE trackers SET vehicle_id = NULL WHERE vehicle_id = ?", [vehicle_id])
+            out[k] = v
+
+    return out
+
 
 # ---------------------------------------------------------------------
-# Listar veículos (com IMEI/vendor e última posição)
+# OPTIONS (preflight) - ajuda CORS para /vehicles e /vehicles/<vid>
+# ---------------------------------------------------------------------
+@bp_fleet.route("/vehicles", methods=["OPTIONS"])
+@bp_fleet.route("/vehicles/<vid>", methods=["OPTIONS"])
+def api_vehicles_options(vid=None):
+    # Flask já responde a OPTIONS automaticamente, mas retornar 204 explícito ajuda depuração
+    return ("", 204)
+
+
+# ---------------------------------------------------------------------
+# Listar veículos
 # ---------------------------------------------------------------------
 @bp_fleet.get("/vehicles")
 @login_required
 def api_list_vehicles():
-    q = (request.args.get("q") or "").strip()
-    only = (request.args.get("status") or "").strip().lower()
+    try:
+        client_id = _client_id()
+        q = (request.args.get("q") or "").strip()
+        only = (request.args.get("status") or "").strip().lower()
 
-    where = []
-    params: List[Any] = []
+        print(f"[DEBUG] GET /vehicles - client_id: {client_id}, q: {q}, only: {only}")
 
-    if q:
-        # busca parcial em id/name/plate/driver/tags
-        where.append("""(
-            v.id ILIKE ? OR v.name ILIKE ? OR v.plate ILIKE ? OR
-            v.driver ILIKE ? OR v.tags ILIKE ?
-        )""")
-        pat = f"%{q}%"
-        params += [pat, pat, pat, pat, pat]
+        vehicles = list_vehicles(client_id, q or None, only or None)
 
-    if only in ("online", "offline", "maintenance"):
-        where.append("COALESCE(v.status,'offline') = ?")
-        params.append(only)
+        # Converte para o formato esperado pelo frontend
+        result = []
+        for v in vehicles:
+            vehicle_data = {
+                "id": v[0],
+                "name": v[1],
+                "plate": v[2],
+                "driver": v[3],
+                "capacity": v[4],
+                "status": v[5],
+                "last_lat": v[6],
+                "last_lon": v[7],
+                "last_speed": v[8],
+                "last_ts": v[9],
+                "last_service_km": v[10],
+                "last_service_date": v[11],
+                "next_service_km": v[12],
+                "notes": v[13],
+                "tracker_id": v[14],
+                "imei": v[15],
+                "vendor": v[16],
+            }
+            # Converte datetime para string
+            if vehicle_data.get("last_ts"):
+                vehicle_data["last_ts"] = str(vehicle_data["last_ts"])
+            if vehicle_data.get("last_service_date"):
+                vehicle_data["last_service_date"] = str(vehicle_data["last_service_date"])
 
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+            result.append(vehicle_data)
 
-    with get_conn() as conn:
-        # última posição via agregação em telemetry
-        sql = f"""
-          SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
-                 v.next_service_km, v.last_service_km, v.tags, v.notes, v.obd_id,
-                 tp.last_lat, tp.last_lon, tp.last_ts,
-                 t.imei, t.vendor
-          FROM vehicles v
-          LEFT JOIN (
-            SELECT vehicle_id,
-                   ANY_VALUE(lat) AS last_lat,
-                   ANY_VALUE(lon) AS last_lon,
-                   MAX(timestamp)  AS last_ts
-            FROM telemetry
-            GROUP BY vehicle_id
-          ) tp ON tp.vehicle_id = v.id
-          LEFT JOIN trackers t ON t.vehicle_id = v.id
-          {where_sql}
-          ORDER BY v.id
-        """
-        rows = conn.execute(sql, params).fetchall()
-        out = _rows_to_dicts(conn, rows)
-        # normalização leve
-        for r in out:
-            # datas -> string ISO
-            if r.get("last_ts") is not None:
-                r["last_ts"] = str(r["last_ts"])
-        return jsonify(out)
+        print(f"[DEBUG] GET /vehicles - encontrados: {len(result)} veículos")
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"[ERROR] GET /vehicles: {e}")
+        print(traceback.format_exc())
+        return _err("Erro interno ao listar veículos", 500)
+
+
+# ---------------------------------------------------------------------
+# Criar/Atualizar (upsert) veículo via POST
+# Mantém seu comportamento: exige id e faz bind do IMEI se enviado.
+# ---------------------------------------------------------------------
+@bp_fleet.post("/vehicles")
+@login_required
+def api_create_vehicle():
+    try:
+        data = request.get_json(force=True) or {}
+        client_id = _client_id()
+
+        print(f"[DEBUG] POST /vehicles - client_id: {client_id}")
+        print(f"[DEBUG] POST /vehicles - data: {data}")
+
+        if not data.get("id"):
+            return _err("ID do veículo é obrigatório", 400)
+
+        vehicle_data = {
+            "id": data["id"],
+            "name": data.get("name", ""),
+            "plate": data.get("plate", ""),
+            "driver": data.get("driver", ""),
+            "capacity": data.get("capacity", 0),
+            "status": data.get("status", "offline"),
+            "tags": data.get("tags", ""),
+            "obd_id": data.get("obd_id", ""),
+            "notes": data.get("notes", ""),
+        }
+
+        print(f"[DEBUG] POST /vehicles - vehicle_data: {vehicle_data}")
+
+        upsert_vehicle(client_id, vehicle_data)
+        print(f"[DEBUG] POST /vehicles - upsert_vehicle concluído")
+
+        # Bind do IMEI opcional
+        imei = (data.get("imei") or "").strip()
+        if imei:
+            print(f"[DEBUG] POST /vehicles - processando IMEI: {imei}")
+            if not _validate_imei(imei):
+                return _err("IMEI inválido (use 15 dígitos).", 400)
+
+            success = tracker_bind_vehicle(
+                client_id=client_id,
+                tracker_id=imei,
+                vehicle_id=data["id"],
+                force=True,
+            )
+            print(f"[DEBUG] POST /vehicles - tracker_bind_vehicle resultado: {success}")
+
+            if not success:
+                return _err("Falha ao vincular tracker", 400)
+
+        return _ok({"success": True, "message": "Veículo salvo com sucesso"})
+
+    except Exception as e:
+        print(f"[ERROR] POST /vehicles: {str(e)}")
+        print(f"[ERROR] POST /vehicles traceback: {traceback.format_exc()}")
+        return _err(f"Erro interno: {str(e)}", 500)
+
 
 # ---------------------------------------------------------------------
 # Obter um veículo
@@ -204,157 +212,223 @@ def api_list_vehicles():
 @bp_fleet.get("/vehicles/<vid>")
 @login_required
 def api_get_vehicle(vid):
-    with get_conn() as conn:
-        rows = conn.execute("""
-          SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
-                 v.next_service_km, v.last_service_km, v.tags, v.notes, v.obd_id,
-                 t.imei, t.vendor
-          FROM vehicles v
-          LEFT JOIN trackers t ON t.vehicle_id = v.id
-          WHERE v.id = ?
-        """, [vid]).fetchall()
-        if not rows:
-            return jsonify({"ok": False, "error": "not_found"}), 404
-        d = _rows_to_dicts(conn, rows)[0]
-        if d.get("last_ts") is not None:
-            d["last_ts"] = str(d["last_ts"])
-        return jsonify(d)
-
-# ---------------------------------------------------------------------
-# Criar veículo (com IMEI/vendor)
-# ---------------------------------------------------------------------
-@bp_fleet.post("/vehicles")
-@login_required
-def api_create_vehicle():
-    data = request.get_json(force=True) or {}
-    if not data.get("id"):
-        return jsonify({"ok": False, "error": "missing_id"}), 400
-
-    imei = (data.get("imei") or "").strip()
-    vendor = (data.get("vendor") or "").strip() or None
-
-    if imei and not _validate_imei(imei):
-        return jsonify({"ok": False, "error": "IMEI inválido (use 15 dígitos)."}), 400
-
     try:
-        _merge_vehicle(data)
-        _merge_tracker_for_vehicle(str(data["id"]).strip(), imei if imei else None, vendor)
+        client_id = _client_id()
+        print(f"[DEBUG] GET /vehicles/{vid} - client_id: {client_id}")
+
+        with get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT v.id, v.name, v.plate, v.driver, v.capacity, v.status,
+                       v.last_lat, v.last_lon, v.last_speed, v.last_ts,
+                       v.last_service_km, v.last_service_date, v.next_service_km, v.notes,
+                       t.tracker_id, t.imei, t.vendor
+                FROM vehicles v
+                LEFT JOIN trackers t
+                  ON t.client_id = v.client_id AND t.vehicle_id = v.id
+                WHERE v.client_id = ? AND v.id = ?
+            """,
+                [client_id, vid],
+            ).fetchone()
+
+            if not row:
+                return _err("Veículo não encontrado", 404)
+
+            vehicle_data = {
+                "id": row[0],
+                "name": row[1],
+                "plate": row[2],
+                "driver": row[3],
+                "capacity": row[4],
+                "status": row[5],
+                "last_lat": row[6],
+                "last_lon": row[7],
+                "last_speed": row[8],
+                "last_ts": row[9],
+                "last_service_km": row[10],
+                "last_service_date": row[11],
+                "next_service_km": row[12],
+                "notes": row[13],
+                "tracker_id": row[14],
+                "imei": row[15],
+                "vendor": row[16],
+            }
+
+            if vehicle_data.get("last_ts"):
+                vehicle_data["last_ts"] = str(vehicle_data["last_ts"])
+            if vehicle_data.get("last_service_date"):
+                vehicle_data["last_service_date"] = str(
+                    vehicle_data["last_service_date"]
+                )
+
+            return jsonify(vehicle_data)
+
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        print(f"[ERROR] GET /vehicles/{vid}: {e}")
+        print(traceback.format_exc())
+        return _err("Erro interno ao buscar veículo", 500)
 
-    return jsonify({"ok": True})
 
 # ---------------------------------------------------------------------
-# Atualizar veículo (com IMEI/vendor)
+# Update parcial (PUT/PATCH) - resolve o 405 do /vehicles/<vid>
 # ---------------------------------------------------------------------
-@bp_fleet.put("/vehicles/<vid>")
+@bp_fleet.route("/vehicles/<vid>", methods=["PUT", "PATCH"])
 @login_required
 def api_update_vehicle(vid):
-    data = request.get_json(force=True) or {}
-    data["id"] = vid
-
-    imei = (data.get("imei") or "").strip()
-    vendor = (data.get("vendor") or "").strip() or None
-    if imei and not _validate_imei(imei):
-        return jsonify({"ok": False, "error": "IMEI inválido (use 15 dígitos)."}), 400
-
     try:
-        _merge_vehicle(data)
-        _merge_tracker_for_vehicle(str(vid), imei if imei else None, vendor)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        client_id = _client_id()
+        data = request.get_json(silent=True) or {}
+        print(f"[DEBUG] {request.method} /vehicles/{vid} - client_id: {client_id}")
+        print(f"[DEBUG] {request.method} /vehicles/{vid} - data: {data}")
 
-    return jsonify({"ok": True})
+        # 1) Filtra campos do veículo (tabela vehicles)
+        update = _sanitize_vehicle_update(data)
+
+        # 2) Caso especial: permitir bind/alteração do IMEI + vendor via update
+        imei   = (data.get("imei") or "").strip()   if data.get("imei")   else None
+        vendor = (data.get("vendor") or "").strip() if data.get("vendor") else None
+
+        if imei is not None and not _validate_imei(imei):
+            return _err("IMEI inválido (use 15 dígitos).", 400)
+
+        if not update and imei is None and vendor is None:
+            return _err("Nenhum campo válido para atualizar", 400)
+
+        with get_conn() as conn:
+            # 3) Verifica existência do veículo
+            exists = conn.execute(
+                "SELECT 1 FROM vehicles WHERE client_id=? AND id=?",
+                [client_id, vid],
+            ).fetchone() is not None
+            if not exists:
+                return _err("Veículo não encontrado", 404)
+
+            # 4) Atualiza campos do veículo (se houver)
+            if update:
+                sets = ", ".join(f"{k}=?" for k in update.keys())
+                params = list(update.values()) + [client_id, vid]
+                conn.execute(
+                    f"UPDATE vehicles SET {sets} WHERE client_id=? AND id=?",
+                    params,
+                )
+
+            # 5) Vincula / atualiza tracker (garantindo imei/vendor persistidos)
+            if imei is not None:
+                # 5.1) garante relação vehicle<->tracker
+                ok = tracker_bind_vehicle(
+                    client_id=client_id, tracker_id=imei, vehicle_id=vid, force=True
+                )
+                if not ok:
+                    return _err("Falha ao vincular tracker", 400)
+
+                # 5.2) upsert na tabela trackers para preencher imei/vendor
+                # Requer UNIQUE(client_id, tracker_id) na tabela 'trackers'
+                conn.execute(
+                    """
+                    INSERT INTO trackers (client_id, tracker_id, vehicle_id, imei, vendor, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(client_id, tracker_id) DO UPDATE SET
+                        vehicle_id=excluded.vehicle_id,
+                        imei=excluded.imei,
+                        vendor=COALESCE(excluded.vendor, trackers.vendor),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    [client_id, imei, vid, imei, vendor or None],
+                )
+
+            elif vendor is not None:
+                # Sem IMEI, mas vendor informado: atualiza vendor do tracker já associado ao veículo
+                conn.execute(
+                    """
+                    UPDATE trackers
+                       SET vendor = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE client_id = ? AND vehicle_id = ?
+                    """,
+                    [vendor, client_id, vid],
+                )
+
+            conn.commit()
+
+        return _ok({
+            "success": True,
+            "id": vid,
+            "updated": {
+                **update,
+                **({"imei": imei} if imei is not None else {}),
+                **({"vendor": vendor} if vendor is not None else {})
+            }
+        })
+
+    except Exception as e:
+        print(f"[ERROR] {request.method} /vehicles/{vid}: {e}")
+        print(traceback.format_exc())
+        return _err("Erro interno ao atualizar veículo", 500)
+
 
 # ---------------------------------------------------------------------
-# Excluir veículo (desvincula tracker)
+# DELETE - remover um veículo
 # ---------------------------------------------------------------------
 @bp_fleet.delete("/vehicles/<vid>")
 @login_required
 def api_delete_vehicle(vid):
-    with get_conn() as con:
-        # garante tabela vehicles
-        con.execute("""
-          CREATE TABLE IF NOT EXISTS vehicles (
-            id TEXT PRIMARY KEY
-          );
-        """)
-        # desvincula trackers
-        con.execute("UPDATE trackers SET vehicle_id = NULL WHERE vehicle_id = ?", [vid])
-        # remove o veículo
-        con.execute("DELETE FROM vehicles WHERE id = ?", [vid])
-    return jsonify({"ok": True})
+    try:
+        client_id = _client_id()
+        print(f"[DEBUG] DELETE /vehicles/{vid} - client_id: {client_id}")
+
+        # preferir função utilitária se já existente
+        if delete_vehicle:
+            ok = delete_vehicle(client_id, vid)
+            if not ok:
+                return _err("Veículo não encontrado", 404)
+        else:
+            with get_conn() as conn:
+                cur = conn.execute(
+                    "DELETE FROM vehicles WHERE client_id=? AND id=?",
+                    [client_id, vid],
+                )
+                conn.commit()
+                if cur.rowcount == 0:
+                    return _err("Veículo não encontrado", 404)
+
+        return _ok({"success": True, "id": vid})
+
+    except Exception as e:
+        print(f"[ERROR] DELETE /vehicles/{vid}: {e}")
+        print(traceback.format_exc())
+        return _err("Erro interno ao remover veículo", 500)
+
 
 # ---------------------------------------------------------------------
-# Importar veículos em lote (aceita imei/vendor)
-# Body: { rows: [{id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor}, ...] }
+# Rota de debug para testar
 # ---------------------------------------------------------------------
-@bp_fleet.post("/vehicles/import")
+@bp_fleet.get("/debug")
 @login_required
-def api_import_vehicles():
-    data = request.get_json(force=True) or {}
-    rows = data.get("rows") or []
-    if not isinstance(rows, list) or not rows:
-        return jsonify({"ok": False, "error": "empty_rows"}), 400
+def api_debug():
+    try:
+        client_id = _client_id()
+        return jsonify(
+            {
+                "client_id": client_id,
+                "status": "ok",
+                "message": "API Fleet funcionando",
+                "user_authenticated": current_user.is_authenticated,
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
-    ok, bad = 0, 0
-    for row in rows:
-        try:
-            if not row.get("id"):
-                bad += 1
-                continue
-            imei = (row.get("imei") or "").strip()
-            vendor = (row.get("vendor") or "").strip() or None
-            if imei and not _validate_imei(imei):
-                # ignora IMEI inválido, mas importa o veículo
-                imei = None
-            _merge_vehicle(row)
-            _merge_tracker_for_vehicle(str(row["id"]).strip(), imei, vendor)
-            ok += 1
-        except Exception:
-            bad += 1
-
-    return jsonify({"ok": True, "imported": ok, "skipped": bad})
 
 # ---------------------------------------------------------------------
-# (Opcional) Atualizar status/última posição a partir de telemetry
+# Health check (sem autenticação)
 # ---------------------------------------------------------------------
-@bp_fleet.post("/vehicles/refresh_last_pos")
-@login_required
-def refresh_last_pos():
-    now = datetime.now(timezone.utc)
-    with get_conn() as con:
-        # última posição por veículo
-        rows = con.execute("""
-          WITH lastp AS (
-            SELECT vehicle_id, MAX(timestamp) AS last_ts
-            FROM telemetry
-            GROUP BY vehicle_id
-          )
-          SELECT p.vehicle_id, p.lat, p.lon, p.speed, p.timestamp AS ts
-          FROM telemetry p
-          JOIN lastp l
-            ON l.vehicle_id = p.vehicle_id AND l.last_ts = p.timestamp
-        """).fetchall()
-        cols = [c[0] for c in con.description]
-        for r in rows:
-            rec = dict(zip(cols, r))
-            is_online = False
-            try:
-                ts = rec["ts"]
-                # ts pode vir naive — assume UTC
-                if getattr(ts, "tzinfo", None) is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                is_online = (now - ts).total_seconds() < 600
-            except Exception:
-                pass
-            _merge_vehicle({
-                "id": rec["vehicle_id"],
-                "status": "online" if is_online else "offline",
-                # campos de “last_*” estão no schema? se não, ignore.
-                # Mantendo apenas status aqui para não conflitar com seu schema atual.
-            })
-    return jsonify({"ok": True})
+@bp_fleet.get("/health")
+def health_check():
+    try:
+        with get_conn() as conn:
+            conn.execute("SELECT 1")
+        return jsonify({"status": "healthy", "database": "connected"})
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 
 
