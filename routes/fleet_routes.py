@@ -155,12 +155,13 @@ def api_list_vehicles():
 def api_create_vehicle():
     try:
         data = request.get_json(force=True) or {}
-        
+        client_id = _client_id()
 
         print(f"[DEBUG] POST /vehicles - client_id: {client_id}")
         print(f"[DEBUG] POST /vehicles - data: {data}")
 
-        
+        if not data.get("id"):
+            return _err("ID do veículo é obrigatório", 400)
 
         vehicle_data = {
             "id": data["id"],
@@ -280,29 +281,29 @@ def api_update_vehicle(vid):
         print(f"[DEBUG] {request.method} /vehicles/{vid} - client_id: {client_id}")
         print(f"[DEBUG] {request.method} /vehicles/{vid} - data: {data}")
 
-        # filtra campos permitidos
+        # 1) Filtra campos do veículo (tabela vehicles)
         update = _sanitize_vehicle_update(data)
 
-        # caso especial: permitir bind/alteração do IMEI via update
-        imei = (data.get("imei") or "").strip() if data.get("imei") else None
+        # 2) Caso especial: permitir bind/alteração do IMEI + vendor via update
+        imei   = (data.get("imei") or "").strip()   if data.get("imei")   else None
+        vendor = (data.get("vendor") or "").strip() if data.get("vendor") else None
+
         if imei is not None and not _validate_imei(imei):
             return _err("IMEI inválido (use 15 dígitos).", 400)
 
-        if not update and imei is None:
+        if not update and imei is None and vendor is None:
             return _err("Nenhum campo válido para atualizar", 400)
 
         with get_conn() as conn:
-            # verifica existência
-            exists = (
-                conn.execute(
-                    "SELECT 1 FROM vehicles WHERE client_id=? AND id=?",
-                    [client_id, vid],
-                ).fetchone()
-                is not None
-            )
+            # 3) Verifica existência do veículo
+            exists = conn.execute(
+                "SELECT 1 FROM vehicles WHERE client_id=? AND id=?",
+                [client_id, vid],
+            ).fetchone() is not None
             if not exists:
                 return _err("Veículo não encontrado", 404)
 
+            # 4) Atualiza campos do veículo (se houver)
             if update:
                 sets = ", ".join(f"{k}=?" for k in update.keys())
                 params = list(update.values()) + [client_id, vid]
@@ -311,17 +312,52 @@ def api_update_vehicle(vid):
                     params,
                 )
 
+            # 5) Vincula / atualiza tracker (garantindo imei/vendor persistidos)
             if imei is not None:
-                # bind/alterar o tracker para este veículo (force=True dissocia de outro)
+                # 5.1) garante relação vehicle<->tracker
                 ok = tracker_bind_vehicle(
                     client_id=client_id, tracker_id=imei, vehicle_id=vid, force=True
                 )
                 if not ok:
                     return _err("Falha ao vincular tracker", 400)
 
+                # 5.2) upsert na tabela trackers para preencher imei/vendor
+                # Requer UNIQUE(client_id, tracker_id) na tabela 'trackers'
+                conn.execute(
+                    """
+                    INSERT INTO trackers (client_id, tracker_id, vehicle_id, imei, vendor, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(client_id, tracker_id) DO UPDATE SET
+                        vehicle_id=excluded.vehicle_id,
+                        imei=excluded.imei,
+                        vendor=COALESCE(excluded.vendor, trackers.vendor),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    [client_id, imei, vid, imei, vendor or None],
+                )
+
+            elif vendor is not None:
+                # Sem IMEI, mas vendor informado: atualiza vendor do tracker já associado ao veículo
+                conn.execute(
+                    """
+                    UPDATE trackers
+                       SET vendor = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE client_id = ? AND vehicle_id = ?
+                    """,
+                    [vendor, client_id, vid],
+                )
+
             conn.commit()
 
-        return _ok({"success": True, "id": vid, "updated": {**update, **({"imei": imei} if imei is not None else {})}})
+        return _ok({
+            "success": True,
+            "id": vid,
+            "updated": {
+                **update,
+                **({"imei": imei} if imei is not None else {}),
+                **({"vendor": vendor} if vendor is not None else {})
+            }
+        })
 
     except Exception as e:
         print(f"[ERROR] {request.method} /vehicles/{vid}: {e}")
@@ -393,6 +429,10 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+
+
+
 
 
 
