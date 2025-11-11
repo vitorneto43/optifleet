@@ -155,13 +155,12 @@ def api_list_vehicles():
 def api_create_vehicle():
     try:
         data = request.get_json(force=True) or {}
-        client_id = _client_id()
+        
 
         print(f"[DEBUG] POST /vehicles - client_id: {client_id}")
         print(f"[DEBUG] POST /vehicles - data: {data}")
 
-        if not data.get("id"):
-            return _err("ID do veículo é obrigatório", 400)
+        
 
         vehicle_data = {
             "id": data["id"],
@@ -394,6 +393,7 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 
 
