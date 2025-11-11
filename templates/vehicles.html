@@ -24,7 +24,7 @@
     .modal>div{background:#111827;border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;max-width:560px;width:100%}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .grid label{font-size:12px;color:var(--muted)}
-    .grid input, .grid textarea{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff;width:100%}
+    .grid input, .grid textarea, .grid select{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff;width:100%}
     .muted{color:var(--muted)}
   </style>
 </head>
@@ -74,8 +74,11 @@
     <div>
       <h3 id="mTitle">Veículo</h3>
       <div class="grid">
-        <!-- ID digitado pelo usuário. Em edição, fica bloqueado -->
-        <div><label>ID</label><input id="m_id" placeholder="ex.: 1" pattern="^[0-9A-Za-z_-]{1,32}$"></div>
+        <!-- ID visível e obrigatório -->
+        <div>
+          <label>ID do veículo (ex.: V1)</label>
+          <input id="m_vid" placeholder="ex.: V1" maxlength="32">
+        </div>
         <div><label>Nome</label><input id="m_name"></div>
         <div><label>Placa</label><input id="m_plate"></div>
         <div><label>Motorista</label><input id="m_driver"></div>
@@ -120,8 +123,8 @@
 const TBL  = document.querySelector('#tbl tbody');
 const info = document.getElementById('info');
 
-let CURRENT = [];   // cache da lista
-let EDITING = false; // se true, o ID fica bloqueado
+let CURRENT = [];
+let EDIT_ID = null; // guarda o id real em edição
 
 async function load(){
   const q  = document.getElementById('q').value.trim();
@@ -166,14 +169,15 @@ async function load(){
 function openModal(){
   document.getElementById('modal').style.display='flex';
   resetForm();
-  EDITING = false;
-  m_id.disabled = false; // criar: ID digitável
 }
 
-function closeModal(){ document.getElementById('modal').style.display='none'; }
+function closeModal(){
+  document.getElementById('modal').style.display='none';
+}
 
 function resetForm(){
-  m_id.value="";
+  EDIT_ID = null;
+  m_vid.value=""; m_vid.disabled = false;
   m_name.value=""; m_plate.value=""; m_driver.value="";
   m_capacity.value=""; m_status.value="offline"; m_obd.value="";
   m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
@@ -182,9 +186,8 @@ function resetForm(){
 
 function edit(v){
   document.getElementById('modal').style.display='flex';
-  EDITING = true;
-  m_id.value = v.id ?? "";
-  m_id.disabled = true; // em edição, não deixa trocar o ID
+  EDIT_ID = v.id;
+  m_vid.value = v.id ?? ""; m_vid.disabled = true; // ID travado na edição
   m_name.value=v.name||""; m_plate.value=v.plate||""; m_driver.value=v.driver||"";
   m_capacity.value=v.capacity??""; m_status.value=v.status||"offline"; m_obd.value=v.obd_id||"";
   m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
@@ -192,19 +195,21 @@ function edit(v){
   m_vendor.value = v.vendor || "";
 }
 
+function normalizeId(s){
+  // tira espaços, força string simples (permite letras/números/_-)
+  return (s||"").trim();
+}
+
 async function save(){
-  const id = m_id.value.trim();
-  if(!id){
-    alert("ID do veículo é obrigatório");
-    return;
-  }
-  if(!/^[0-9A-Za-z_-]{1,32}$/.test(id)){
-    alert("ID inválido. Use 1–32 caracteres: dígitos, letras, _ ou -");
+  const idInput = normalizeId(m_vid.value);
+  const creating = !EDIT_ID;
+
+  if (creating && !idInput){
+    alert("Informe o ID do veículo (ex.: V1).");
     return;
   }
 
   const body = {
-    id, // no create o backend precisa do id no corpo
     name: m_name.value.trim(),
     plate: m_plate.value.trim(),
     driver: m_driver.value.trim(),
@@ -224,12 +229,16 @@ async function save(){
     return;
   }
 
-  // editar: PATCH /api/fleet/vehicles/:id  (não muda o id)
-  // criar:  POST  /api/fleet/vehicles      (com id no corpo)
-  const method = EDITING ? 'PATCH' : 'POST';
-  const url    = EDITING ? `/api/fleet/vehicles/${encodeURIComponent(id)}` : '/api/fleet/vehicles';
-
-  const payload = EDITING ? { ...body, id: undefined } : body; // não tentar trocar id no PATCH
+  let url, method, payload;
+  if (creating){
+    url = '/api/fleet/vehicles';
+    method = 'POST';
+    payload = { id: idInput, ...body }; // POST exige ID
+  } else {
+    url = `/api/fleet/vehicles/${encodeURIComponent(EDIT_ID)}`;
+    method = 'PATCH';
+    payload = body; // PATCH não troca ID
+  }
 
   const res = await fetch(url, {
     method,
@@ -312,7 +321,6 @@ window.addEventListener('DOMContentLoaded', load);
 </script>
 </body>
 </html>
-
 
 
 
