@@ -9,7 +9,7 @@
   <style>
     .wrap{max-width:1100px;margin:18px auto;padding:0 16px}
     .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
-    .toolbar input, .toolbar select{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff}
+    .toolbar input,.toolbar select{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff}
     table{width:100%;border-collapse:collapse}
     th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left;font-size:14px}
     .badge{padding:4px 8px;border-radius:999px;font-size:12px}
@@ -24,7 +24,7 @@
     .modal>div{background:#111827;border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;max-width:560px;width:100%}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .grid label{font-size:12px;color:var(--muted)}
-    .grid input, .grid textarea{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff;width:100%}
+    .grid input,.grid textarea{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff;width:100%}
     .muted{color:var(--muted)}
   </style>
 </head>
@@ -46,7 +46,7 @@
 
   <div class="wrap">
     <div class="toolbar">
-      <input id="q" placeholder="Buscar por id, nome, placa, driver ou tag" oninput="load()">
+      <input id="q" placeholder="Buscar por nome, placa, motorista ou tag" oninput="load()">
       <select id="status" onchange="load()">
         <option value="">Status (todos)</option>
         <option value="online">Online</option>
@@ -61,10 +61,8 @@
     <table id="tbl">
       <thead>
         <tr>
-          <th>ID</th><th>Nome</th><th>Placa</th><th>Motorista</th><th>Cap.</th><th>Status</th>
+          <th>Nome</th><th>Placa</th><th>Motorista</th><th>Cap.</th><th>Status</th>
           <th>Última posição</th><th>Próx. serv. (km)</th><th>IMEI</th><th>Tags</th><th></th>
-
-
         </tr>
       </thead>
       <tbody></tbody>
@@ -76,15 +74,12 @@
     <div>
       <h3 id="mTitle">Veículo</h3>
       <div class="grid">
-        <div><label>ID</label><input id="m_id"></div>
         <div><label>Nome</label><input id="m_name"></div>
         <div><label>Placa</label><input id="m_plate"></div>
         <div><label>Motorista</label><input id="m_driver"></div>
         <div><label>Capacidade</label><input id="m_capacity" type="number"></div>
         <div><label for="m_imei">IMEI do rastreador</label><input id="m_imei" placeholder="15 dígitos" maxlength="15" pattern="\d{15}"></div>
         <div><label for="m_vendor">Fabricante (opcional)</label><input id="m_vendor" placeholder="Ex.: TK-Star, Concox"></div>
-
-
         <div>
           <label>Status</label>
           <select id="m_status">
@@ -110,7 +105,7 @@
   <div class="modal" id="import">
     <div>
       <h3>Importar veículos</h3>
-      <p class="muted">Cole JSON (lista de objetos) ou CSV com cabeçalhos: <code>id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor</code></p>
+      <p class="muted">Cole JSON (lista de objetos) ou CSV com cabeçalhos: <code>name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor</code></p>
       <textarea id="imp_text" rows="10" style="width:100%;padding:8px;border-radius:8px;background:#0b132b;color:#fff;border:1px solid rgba(255,255,255,.15)"></textarea>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
         <button class="btn ghost" onclick="closeImport()">Cancelar</button>
@@ -120,120 +115,146 @@
   </div>
 
 <script>
-const TBL = document.querySelector('#tbl tbody');
+const TBL  = document.querySelector('#tbl tbody');
 const info = document.getElementById('info');
 
+let CURRENT = [];     // lista renderizada
+let EDIT_ID = null;   // id real do backend quando estiver editando
+
 async function load(){
-  const q = document.getElementById('q').value.trim();
+  const q  = document.getElementById('q').value.trim();
   const st = document.getElementById('status').value;
   const qs = new URLSearchParams();
-  if(q) qs.set('q', q);
+  if(q)  qs.set('q', q);
   if(st) qs.set('status', st);
-  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`);
+
+  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`, { credentials:'include' });
   const data = await r.json();
+  CURRENT = Array.isArray(data) ? data : [];
+
   TBL.innerHTML = "";
-  data.forEach(v => {
+  CURRENT.forEach((v) => {
     const tr = document.createElement('tr');
     const badge = v.status === 'online' ? 'b-online' : (v.status==='maintenance'?'b-maint':'b-offline');
-    const lastp = (v.last_lat && v.last_lon) ? `${v.last_lat.toFixed(5)}, ${v.last_lon.toFixed(5)}${v.last_ts?`<br><span class="muted">${v.last_ts}</span>`:''}` : '<span class="muted">—</span>';
+    const lastp = (v.last_lat && v.last_lon)
+      ? `${Number(v.last_lat).toFixed(5)}, ${Number(v.last_lon).toFixed(5)}${v.last_ts?`<br><span class="muted">${v.last_ts}</span>`:''}`
+      : '<span class="muted">—</span>';
     tr.innerHTML = `
-      <td>${v.id}</td>
       <td>${v.name||''}</td>
       <td>${v.plate||''}</td>
       <td>${v.driver||''}</td>
-      <td>${v.capacity??''}</td>
+      <td>${v.capacity ?? ''}</td>
       <td><span class="badge ${badge}">${v.status||'offline'}</span></td>
       <td>${lastp}</td>
       <td>${v.next_service_km ?? 0}</td>
-      <td>${v.imei || ''}</td>              <!-- 👈 ADICIONE ESTA LINHA -->
+      <td>${v.imei || ''}</td>
       <td>${v.tags||''}</td>
       <td class="right">
         <button class="btn ghost" onclick='edit(${JSON.stringify(v)})'>Editar</button>
-        <button class="btn red" onclick='delVeh("${v.id}")'>Excluir</button>
+        <button class="btn red"   onclick='delVeh(${JSON.stringify(v.id)})'>Excluir</button>
       </td>
     `;
-
     TBL.appendChild(tr);
   });
-  info.textContent = `${data.length} veículo(s)`;
+  info.textContent = `${CURRENT.length} veículo(s)`;
 }
 
 function openModal(){
   document.getElementById('modal').style.display='flex';
   resetForm();
-  m_id.disabled = false;     // 👈 garante que pode digitar ID no “novo”
 }
 
 function closeModal(){ document.getElementById('modal').style.display='none'; }
+
 function resetForm(){
-  m_id.value=""; m_name.value=""; m_plate.value=""; m_driver.value="";
+  EDIT_ID = null;
+  m_name.value=""; m_plate.value=""; m_driver.value="";
   m_capacity.value=""; m_status.value="offline"; m_obd.value="";
   m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
   m_imei.value=""; m_vendor.value="";
-
 }
+
 function edit(v){
   document.getElementById('modal').style.display='flex';
-  m_id.value=v.id; m_id.disabled=true;
+  EDIT_ID = v.id; // guarda o id real do backend
   m_name.value=v.name||""; m_plate.value=v.plate||""; m_driver.value=v.driver||"";
-  m_capacity.value=v.capacity??""; m_status.value=v.status||"offline"; m_obd.value=v.obd_id||"";
-  m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
-  m_imei.value = v.imei || "";
-  m_vendor.value = v.vendor || "";
-
+  m_capacity.value=v.capacity ?? ""; m_status.value=v.status || "offline"; m_obd.value=v.obd_id||"";
+  m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km ?? 0; m_lastkm.value=v.last_service_km ?? 0; m_notes.value=v.notes||"";
+  m_imei.value=v.imei || ""; m_vendor.value=v.vendor || "";
 }
+
 async function save(){
   const body = {
-    id: m_id.value.trim(), name: m_name.value.trim(), plate: m_plate.value.trim(),
-    driver: m_driver.value.trim(), capacity: parseInt(m_capacity.value||"0"),
-    status: m_status.value, obd_id: m_obd.value.trim(), tags: m_tags.value.trim(),
-    next_service_km: parseFloat(m_nextkm.value||"0"), last_service_km: parseFloat(m_lastkm.value||"0"),
+    name: m_name.value.trim(),
+    plate: m_plate.value.trim(),
+    driver: m_driver.value.trim(),
+    capacity: Number(m_capacity.value||"0"),
+    status: m_status.value,
+    obd_id: m_obd.value.trim(),
+    tags: m_tags.value.trim(),
+    next_service_km: Number(m_nextkm.value||"0"),
+    last_service_km: Number(m_lastkm.value||"0"),
     notes: m_notes.value.trim(),
-    imei: m_imei.value.trim(),            // 👈 novo
-    vendor: m_vendor.value.trim()         // 👈 novo
+    imei: m_imei.value.trim(),
+    vendor: m_vendor.value.trim()
   };
-
   if (body.imei && !/^\d{15}$/.test(body.imei)) {
-    alert("IMEI deve ter 15 dígitos numéricos.");
-    return;
+    alert("IMEI deve ter 15 dígitos numéricos."); return;
   }
 
+  const isEdit = EDIT_ID !== null && EDIT_ID !== undefined;
+  const url    = isEdit ? `/api/fleet/vehicles/${encodeURIComponent(EDIT_ID)}` : '/api/fleet/vehicles';
+  const method = isEdit ? 'PATCH' : 'POST';
 
-  if(!body.id){ alert("Informe o ID do veículo."); return; }
-  const method = m_id.disabled ? 'PUT' : 'POST';
-  const url = m_id.disabled ? `/api/fleet/vehicles/${encodeURIComponent(body.id)}` : '/api/fleet/vehicles';
-  const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  if(!r.ok){ alert("Erro ao salvar."); return; }
-  closeModal(); load();
+  const res = await fetch(url, {
+    method,
+    headers:{'Content-Type':'application/json'},
+    credentials:'include',
+    body: JSON.stringify(body)
+  });
+
+  if(!res.ok){
+    let msg = 'Erro ao salvar.';
+    try{ const j=await res.json(); if(j && j.error) msg=j.error; }catch(_){}
+    alert(msg); return;
+  }
+  closeModal(); await load();
 }
+
 async function delVeh(id){
   if(!confirm(`Excluir veículo ${id}?`)) return;
-  const r = await fetch(`/api/fleet/vehicles/${encodeURIComponent(id)}`, {method:'DELETE'});
-  if(!r.ok){ alert("Erro ao excluir."); return; }
-  load();
+  const r = await fetch(`/api/fleet/vehicles/${encodeURIComponent(id)}`, {
+    method:'DELETE',
+    credentials:'include'
+  });
+  if(!r.ok){
+    let msg='Erro ao excluir.';
+    try{ const j=await r.json(); if(j && j.error) msg=j.error; }catch(_){}
+    alert(msg); return;
+  }
+  await load();
 }
 
 function openImport(){ document.getElementById('import').style.display='flex'; }
 function closeImport(){ document.getElementById('import').style.display='none'; }
+
 async function doImport(){
   let txt = document.getElementById('imp_text').value.trim();
   if(!txt){ closeImport(); return; }
 
   let rows = [];
   try{
-    if(txt.startsWith('[')){ // JSON
-      rows = JSON.parse(txt);
-    }else{ // CSV simples
-      rows = csvParse(txt);
-    }
-  }catch(e){
-    alert("Formato inválido."); return;
-  }
+    if(txt.startsWith('[')){ rows = JSON.parse(txt); }
+    else { rows = csvParse(txt); }
+  }catch(e){ alert("Formato inválido."); return; }
+
   const r = await fetch('/api/fleet/vehicles/import', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    credentials:'include',
     body: JSON.stringify({rows})
   });
-  const data = await r.json();
+  const data = await r.json().catch(()=>({}));
   if(!r.ok){ alert(data.error||"Erro ao importar."); return; }
   closeImport(); load();
 }
@@ -245,20 +266,16 @@ function csvParse(s){
     const cols = line.split(',');
     const o = {};
     header.forEach((h,i)=> o[h] = (cols[i]??'').trim());
-    // numéricos
     ['capacity','next_service_km','last_service_km'].forEach(k=>{
       if(o[k]!==undefined && o[k]!=='') o[k] = Number(o[k]);
     });
-    // validação leve de imei (se existir)
-    if (o.imei && !/^\d{15}$/.test(o.imei)) {
-      o.imei = ''; // ignora inválido
-    }
+    if (o.imei && !/^\d{15}$/.test(o.imei)) o.imei = '';
     return o;
   });
 }
-
 
 window.addEventListener('DOMContentLoaded', load);
 </script>
 </body>
 </html>
+
