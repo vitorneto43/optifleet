@@ -273,10 +273,34 @@ def upsert_vehicle(client_id: int, v: dict):
     ])
     con.close()
 
-def delete_vehicle(client_id: int, vehicle_id: str):
+# core/db.py
+def delete_vehicle(client_id: int, vehicle_id: str) -> bool:
     con = get_conn()
-    con.execute("DELETE FROM vehicles WHERE client_id=? AND id=?", [client_id, vehicle_id])
-    con.close()
+    try:
+        # verifica existência
+        found = con.execute(
+            "SELECT 1 FROM vehicles WHERE client_id=? AND id=?",
+            [client_id, vehicle_id]
+        ).fetchone()
+        if not found:
+            return False
+
+        # apaga veículo
+        con.execute(
+            "DELETE FROM vehicles WHERE client_id=? AND id=?",
+            [client_id, vehicle_id]
+        )
+
+        # desassocia tracker que apontava para esse vehicle_id (se houver)
+        con.execute(
+            "UPDATE trackers SET vehicle_id=NULL WHERE client_id=? AND vehicle_id=?",
+            [client_id, vehicle_id]
+        )
+
+        return True
+    finally:
+        con.close()
+
 
 def list_vehicles(client_id: int, q: Optional[str]=None, only: Optional[str]=None):
     con = get_conn()
@@ -386,20 +410,20 @@ def tracker_bind_vehicle(client_id: int, tracker_id: str, vehicle_id: str, force
     """Vincula um tracker a um veículo - VERSÃO CORRIGIDA"""
     try:
         con = get_conn()
-        
+
         # Verifica se o tracker existe
         existing = con.execute("""
             SELECT id, vehicle_id FROM trackers 
             WHERE client_id=? AND tracker_id=?
         """, [client_id, tracker_id]).fetchone()
-        
+
         if existing:
             tracker_db_id, current_vehicle = existing
             # Se já está vinculado a outro veículo e não é force, retorna erro
             if current_vehicle and current_vehicle != vehicle_id and not force:
                 con.close()
                 return False
-            
+
             # Atualiza o vínculo
             con.execute("""
                 UPDATE trackers SET vehicle_id=?
@@ -414,10 +438,10 @@ def tracker_bind_vehicle(client_id: int, tracker_id: str, vehicle_id: str, force
                 (id, client_id, tracker_id, secret_token, vehicle_id, imei, status)
                 VALUES (?, ?, ?, ?, ?, ?, 'active')
             """, [next_id, client_id, tracker_id, token, vehicle_id, tracker_id])
-        
+
         con.close()
         return True
-        
+
     except Exception as e:
         print(f"[ERROR] tracker_bind_vehicle: {e}")
         if con:
@@ -768,5 +792,7 @@ def contact_save(name: str, email: str, company: str, message: str):
     """, [cid, name, email, company, message, now])
     con.close()
     return cid
+
+
 
 
