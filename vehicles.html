@@ -74,7 +74,7 @@
     <div>
       <h3 id="mTitle">Veículo</h3>
       <div class="grid">
-        <div><label>ID</label><input id="m_id"></div>
+        <div><label>ID (auto)</label><input id="m_id" disabled></div> <!-- ID sempre somente leitura -->
         <div><label>Nome</label><input id="m_name"></div>
         <div><label>Placa</label><input id="m_plate"></div>
         <div><label>Motorista</label><input id="m_driver"></div>
@@ -106,7 +106,7 @@
   <div class="modal" id="import">
     <div>
       <h3>Importar veículos</h3>
-      <p class="muted">Cole JSON (lista de objetos) ou CSV com cabeçalhos: <code>id,name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor</code></p>
+      <p class="muted">Cole JSON (lista de objetos) ou CSV com cabeçalhos: <code>name,plate,driver,capacity,tags,obd_id,status,next_service_km,notes,imei,vendor</code></p>
       <textarea id="imp_text" rows="10" style="width:100%;padding:8px;border-radius:8px;background:#0b132b;color:#fff;border:1px solid rgba(255,255,255,.15)"></textarea>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
         <button class="btn ghost" onclick="closeImport()">Cancelar</button>
@@ -119,18 +119,22 @@
 const TBL  = document.querySelector('#tbl tbody');
 const info = document.getElementById('info');
 
+// memória local da lista para evitar “embaralhar” na edição
+let CURRENT = [];  // <-- manter a lista em memória
+
 async function load(){
   const q  = document.getElementById('q').value.trim();
   const st = document.getElementById('status').value;
   const qs = new URLSearchParams();
   if(q)  qs.set('q', q);
   if(st) qs.set('status', st);
-  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`, {
-    credentials: 'include'
-  });
+  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`, { credentials: 'include' });
   const data = await r.json();
+
+  CURRENT = Array.isArray(data) ? data : []; // <-- guarda a lista
+
   TBL.innerHTML = "";
-  data.forEach(v => {
+  CURRENT.forEach((v, idx) => {
     const tr = document.createElement('tr');
     const badge = v.status === 'online' ? 'b-online' : (v.status==='maintenance'?'b-maint':'b-offline');
     const lastp = (v.last_lat && v.last_lon)
@@ -148,33 +152,40 @@ async function load(){
       <td>${v.imei || ''}</td>
       <td>${v.tags||''}</td>
       <td class="right">
-        <button class="btn ghost" onclick='edit(${JSON.stringify(v)})'>Editar</button>
-        <button class="btn red"   onclick='delVeh("${v.id}")'>Excluir</button>
+        <button class="btn ghost" data-idx="${idx}" onclick="onEdit(this)">Editar</button>
+        <button class="btn red"   onclick='delVeh(${JSON.stringify(v.id)})'>Excluir</button>
       </td>
     `;
     TBL.appendChild(tr);
   });
-  info.textContent = `${data.length} veículo(s)`;
+  info.textContent = `${CURRENT.length} veículo(s)`;
+}
+
+function onEdit(btn){
+  const idx = Number(btn.getAttribute('data-idx'));
+  const v = CURRENT[idx] || {};
+  edit(v);
 }
 
 function openModal(){
   document.getElementById('modal').style.display='flex';
   resetForm();
-  m_id.disabled = false; // novo
 }
 
 function closeModal(){ document.getElementById('modal').style.display='none'; }
 
 function resetForm(){
-  m_id.value=""; m_name.value=""; m_plate.value=""; m_driver.value="";
+  m_id.value="(auto)"; m_name.value=""; m_plate.value=""; m_driver.value="";
   m_capacity.value=""; m_status.value="offline"; m_obd.value="";
   m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
   m_imei.value=""; m_vendor.value="";
+  m_id.dataset.realId = ""; // <-- limpa id real
 }
 
 function edit(v){
   document.getElementById('modal').style.display='flex';
-  m_id.value=v.id; m_id.disabled=true;
+  m_id.value = v.id;                // exibimos
+  m_id.dataset.realId = v.id;       // guardamos o id real p/ PATCH/DELETE
   m_name.value=v.name||""; m_plate.value=v.plate||""; m_driver.value=v.driver||"";
   m_capacity.value=v.capacity??""; m_status.value=v.status||"offline"; m_obd.value=v.obd_id||"";
   m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
@@ -183,17 +194,17 @@ function edit(v){
 }
 
 async function save(){
+  // monta payload SEM id (o backend gera/usa o dele)
   const body = {
-    id: m_id.value.trim(),
     name: m_name.value.trim(),
     plate: m_plate.value.trim(),
     driver: m_driver.value.trim(),
-    capacity: parseInt(m_capacity.value||"0"),
+    capacity: Number(m_capacity.value||"0"),
     status: m_status.value,
     obd_id: m_obd.value.trim(),
     tags: m_tags.value.trim(),
-    next_service_km: parseFloat(m_nextkm.value||"0"),
-    last_service_km: parseFloat(m_lastkm.value||"0"),
+    next_service_km: Number(m_nextkm.value||"0"),
+    last_service_km: Number(m_lastkm.value||"0"),
     notes: m_notes.value.trim(),
     imei: m_imei.value.trim(),
     vendor: m_vendor.value.trim()
@@ -203,55 +214,28 @@ async function save(){
     alert("IMEI deve ter 15 dígitos numéricos.");
     return;
   }
-  if(!body.id){
-    alert("Informe o ID do veículo.");
-    return;
-  }
 
-  // Criação usa POST; edição usa PATCH para evitar 405
-  const isEdit = m_id.disabled;
+  const realId = m_id.dataset.realId;               // <-- se tem id, é edição
+  const isEdit = !!realId;
   const method = isEdit ? 'PATCH' : 'POST';
-  const url    = isEdit
-    ? `/api/fleet/vehicles/${encodeURIComponent(body.id)}`
-    : '/api/fleet/vehicles';
+  const url    = isEdit ? `/api/fleet/vehicles/${encodeURIComponent(realId)}` : '/api/fleet/vehicles';
 
   const res = await fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify(
-      isEdit
-        // no update mandamos apenas campos editáveis + imei
-        ? {
-            name: body.name,
-            plate: body.plate,
-            driver: body.driver,
-            capacity: body.capacity,
-            status: body.status,
-            obd_id: body.obd_id,
-            tags: body.tags,
-            next_service_km: body.next_service_km,
-            last_service_km: body.last_service_km,
-            notes: body.notes,
-            imei: body.imei
-          }
-        // no create mantemos o payload completo (id obrigatório)
-        : body
-    )
+    body: JSON.stringify(body)
   });
 
   if(!res.ok){
     let msg = 'Erro ao salvar.';
-    try {
-      const j = await res.json();
-      if (j && j.error) msg = j.error;
-    } catch(_) {}
+    try { const j = await res.json(); if (j && j.error) msg = j.error; } catch(_){}
     alert(msg);
     return;
   }
 
   closeModal();
-  load();
+  await load();
 }
 
 async function delVeh(id){
@@ -262,14 +246,11 @@ async function delVeh(id){
   });
   if(!r.ok){
     let msg = 'Erro ao excluir.';
-    try {
-      const j = await r.json();
-      if (j && j.error) msg = j.error;
-    } catch(_) {}
+    try { const j = await r.json(); if (j && j.error) msg = j.error; } catch(_){}
     alert(msg);
     return;
   }
-  load();
+  await load();
 }
 
 function openImport(){ document.getElementById('import').style.display='flex'; }
@@ -283,7 +264,7 @@ async function doImport(){
   try{
     if(txt.startsWith('[')){ // JSON
       rows = JSON.parse(txt);
-    }else{ // CSV simples
+    }else{ // CSV simples (sem coluna id)
       rows = csvParse(txt);
     }
   }catch(e){
@@ -310,9 +291,7 @@ function csvParse(s){
     ['capacity','next_service_km','last_service_km'].forEach(k=>{
       if(o[k]!==undefined && o[k]!=='') o[k] = Number(o[k]);
     });
-    if (o.imei && !/^\d{15}$/.test(o.imei)) {
-      o.imei = ''; // ignora inválido
-    }
+    if (o.imei && !/^\d{15}$/.test(o.imei)) o.imei = ''; // ignora inválido
     return o;
   });
 }
