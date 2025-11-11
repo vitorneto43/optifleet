@@ -63,8 +63,6 @@
         <tr>
           <th>ID</th><th>Nome</th><th>Placa</th><th>Motorista</th><th>Cap.</th><th>Status</th>
           <th>Última posição</th><th>Próx. serv. (km)</th><th>IMEI</th><th>Tags</th><th></th>
-
-
         </tr>
       </thead>
       <tbody></tbody>
@@ -83,8 +81,6 @@
         <div><label>Capacidade</label><input id="m_capacity" type="number"></div>
         <div><label for="m_imei">IMEI do rastreador</label><input id="m_imei" placeholder="15 dígitos" maxlength="15" pattern="\d{15}"></div>
         <div><label for="m_vendor">Fabricante (opcional)</label><input id="m_vendor" placeholder="Ex.: TK-Star, Concox"></div>
-
-
         <div>
           <label>Status</label>
           <select id="m_status">
@@ -120,22 +116,26 @@
   </div>
 
 <script>
-const TBL = document.querySelector('#tbl tbody');
+const TBL  = document.querySelector('#tbl tbody');
 const info = document.getElementById('info');
 
 async function load(){
-  const q = document.getElementById('q').value.trim();
+  const q  = document.getElementById('q').value.trim();
   const st = document.getElementById('status').value;
   const qs = new URLSearchParams();
-  if(q) qs.set('q', q);
+  if(q)  qs.set('q', q);
   if(st) qs.set('status', st);
-  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`);
+  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`, {
+    credentials: 'include'
+  });
   const data = await r.json();
   TBL.innerHTML = "";
   data.forEach(v => {
     const tr = document.createElement('tr');
     const badge = v.status === 'online' ? 'b-online' : (v.status==='maintenance'?'b-maint':'b-offline');
-    const lastp = (v.last_lat && v.last_lon) ? `${v.last_lat.toFixed(5)}, ${v.last_lon.toFixed(5)}${v.last_ts?`<br><span class="muted">${v.last_ts}</span>`:''}` : '<span class="muted">—</span>';
+    const lastp = (v.last_lat && v.last_lon)
+      ? `${Number(v.last_lat).toFixed(5)}, ${Number(v.last_lon).toFixed(5)}${v.last_ts?`<br><span class="muted">${v.last_ts}</span>`:''}`
+      : '<span class="muted">—</span>';
     tr.innerHTML = `
       <td>${v.id}</td>
       <td>${v.name||''}</td>
@@ -145,14 +145,13 @@ async function load(){
       <td><span class="badge ${badge}">${v.status||'offline'}</span></td>
       <td>${lastp}</td>
       <td>${v.next_service_km ?? 0}</td>
-      <td>${v.imei || ''}</td>              <!-- 👈 ADICIONE ESTA LINHA -->
+      <td>${v.imei || ''}</td>
       <td>${v.tags||''}</td>
       <td class="right">
         <button class="btn ghost" onclick='edit(${JSON.stringify(v)})'>Editar</button>
-        <button class="btn red" onclick='delVeh("${v.id}")'>Excluir</button>
+        <button class="btn red"   onclick='delVeh("${v.id}")'>Excluir</button>
       </td>
     `;
-
     TBL.appendChild(tr);
   });
   info.textContent = `${data.length} veículo(s)`;
@@ -161,17 +160,18 @@ async function load(){
 function openModal(){
   document.getElementById('modal').style.display='flex';
   resetForm();
-  m_id.disabled = false;     // 👈 garante que pode digitar ID no “novo”
+  m_id.disabled = false; // novo
 }
 
 function closeModal(){ document.getElementById('modal').style.display='none'; }
+
 function resetForm(){
   m_id.value=""; m_name.value=""; m_plate.value=""; m_driver.value="";
   m_capacity.value=""; m_status.value="offline"; m_obd.value="";
   m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
   m_imei.value=""; m_vendor.value="";
-
 }
+
 function edit(v){
   document.getElementById('modal').style.display='flex';
   m_id.value=v.id; m_id.disabled=true;
@@ -180,41 +180,101 @@ function edit(v){
   m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
   m_imei.value = v.imei || "";
   m_vendor.value = v.vendor || "";
-
 }
+
 async function save(){
   const body = {
-    id: m_id.value.trim(), name: m_name.value.trim(), plate: m_plate.value.trim(),
-    driver: m_driver.value.trim(), capacity: parseInt(m_capacity.value||"0"),
-    status: m_status.value, obd_id: m_obd.value.trim(), tags: m_tags.value.trim(),
-    next_service_km: parseFloat(m_nextkm.value||"0"), last_service_km: parseFloat(m_lastkm.value||"0"),
+    id: m_id.value.trim(),
+    name: m_name.value.trim(),
+    plate: m_plate.value.trim(),
+    driver: m_driver.value.trim(),
+    capacity: parseInt(m_capacity.value||"0"),
+    status: m_status.value,
+    obd_id: m_obd.value.trim(),
+    tags: m_tags.value.trim(),
+    next_service_km: parseFloat(m_nextkm.value||"0"),
+    last_service_km: parseFloat(m_lastkm.value||"0"),
     notes: m_notes.value.trim(),
-    imei: m_imei.value.trim(),            // 👈 novo
-    vendor: m_vendor.value.trim()         // 👈 novo
+    imei: m_imei.value.trim(),
+    vendor: m_vendor.value.trim()
   };
 
   if (body.imei && !/^\d{15}$/.test(body.imei)) {
     alert("IMEI deve ter 15 dígitos numéricos.");
     return;
   }
+  if(!body.id){
+    alert("Informe o ID do veículo.");
+    return;
+  }
 
+  // Criação usa POST; edição usa PATCH para evitar 405
+  const isEdit = m_id.disabled;
+  const method = isEdit ? 'PATCH' : 'POST';
+  const url    = isEdit
+    ? `/api/fleet/vehicles/${encodeURIComponent(body.id)}`
+    : '/api/fleet/vehicles';
 
-  if(!body.id){ alert("Informe o ID do veículo."); return; }
-  const method = m_id.disabled ? 'PUT' : 'POST';
-  const url = m_id.disabled ? `/api/fleet/vehicles/${encodeURIComponent(body.id)}` : '/api/fleet/vehicles';
-  const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  if(!r.ok){ alert("Erro ao salvar."); return; }
-  closeModal(); load();
+  const res = await fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(
+      isEdit
+        // no update mandamos apenas campos editáveis + imei
+        ? {
+            name: body.name,
+            plate: body.plate,
+            driver: body.driver,
+            capacity: body.capacity,
+            status: body.status,
+            obd_id: body.obd_id,
+            tags: body.tags,
+            next_service_km: body.next_service_km,
+            last_service_km: body.last_service_km,
+            notes: body.notes,
+            imei: body.imei
+          }
+        // no create mantemos o payload completo (id obrigatório)
+        : body
+    )
+  });
+
+  if(!res.ok){
+    let msg = 'Erro ao salvar.';
+    try {
+      const j = await res.json();
+      if (j && j.error) msg = j.error;
+    } catch(_) {}
+    alert(msg);
+    return;
+  }
+
+  closeModal();
+  load();
 }
+
 async function delVeh(id){
   if(!confirm(`Excluir veículo ${id}?`)) return;
-  const r = await fetch(`/api/fleet/vehicles/${encodeURIComponent(id)}`, {method:'DELETE'});
-  if(!r.ok){ alert("Erro ao excluir."); return; }
+  const r = await fetch(`/api/fleet/vehicles/${encodeURIComponent(id)}`, {
+    method:'DELETE',
+    credentials:'include'
+  });
+  if(!r.ok){
+    let msg = 'Erro ao excluir.';
+    try {
+      const j = await r.json();
+      if (j && j.error) msg = j.error;
+    } catch(_) {}
+    alert(msg);
+    return;
+  }
   load();
 }
 
 function openImport(){ document.getElementById('import').style.display='flex'; }
 function closeImport(){ document.getElementById('import').style.display='none'; }
+
 async function doImport(){
   let txt = document.getElementById('imp_text').value.trim();
   if(!txt){ closeImport(); return; }
@@ -230,10 +290,12 @@ async function doImport(){
     alert("Formato inválido."); return;
   }
   const r = await fetch('/api/fleet/vehicles/import', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    credentials:'include',
     body: JSON.stringify({rows})
   });
-  const data = await r.json();
+  const data = await r.json().catch(()=>({}));
   if(!r.ok){ alert(data.error||"Erro ao importar."); return; }
   closeImport(); load();
 }
@@ -245,18 +307,15 @@ function csvParse(s){
     const cols = line.split(',');
     const o = {};
     header.forEach((h,i)=> o[h] = (cols[i]??'').trim());
-    // numéricos
     ['capacity','next_service_km','last_service_km'].forEach(k=>{
       if(o[k]!==undefined && o[k]!=='') o[k] = Number(o[k]);
     });
-    // validação leve de imei (se existir)
     if (o.imei && !/^\d{15}$/.test(o.imei)) {
       o.imei = ''; // ignora inválido
     }
     return o;
   });
 }
-
 
 window.addEventListener('DOMContentLoaded', load);
 </script>
