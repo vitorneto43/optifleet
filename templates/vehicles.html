@@ -74,8 +74,7 @@
     <div>
       <h3 id="mTitle">Veículo</h3>
       <div class="grid">
-        <!-- guardamos o ID real como data-attr no próprio modal -->
-        <input id="m_id_hidden" type="hidden" value="">
+        <div><label>ID (auto)</label><input id="m_id" disabled></div> <!-- ID sempre somente leitura -->
         <div><label>Nome</label><input id="m_name"></div>
         <div><label>Placa</label><input id="m_plate"></div>
         <div><label>Motorista</label><input id="m_driver"></div>
@@ -120,9 +119,8 @@
 const TBL  = document.querySelector('#tbl tbody');
 const info = document.getElementById('info');
 
-// cache atual para edição estável
-let CURRENT = [];
-let EDIT_ID = null; // id real em edição
+// memória local da lista para evitar “embaralhar” na edição
+let CURRENT = [];  // <-- manter a lista em memória
 
 async function load(){
   const q  = document.getElementById('q').value.trim();
@@ -130,21 +128,20 @@ async function load(){
   const qs = new URLSearchParams();
   if(q)  qs.set('q', q);
   if(st) qs.set('status', st);
-
   const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`, { credentials: 'include' });
-  const data = await r.json().catch(()=>[]);
-  CURRENT = Array.isArray(data) ? data : [];
+  const data = await r.json();
+
+  CURRENT = Array.isArray(data) ? data : []; // <-- guarda a lista
 
   TBL.innerHTML = "";
-  for (const v of CURRENT){
+  CURRENT.forEach((v, idx) => {
     const tr = document.createElement('tr');
     const badge = v.status === 'online' ? 'b-online' : (v.status==='maintenance'?'b-maint':'b-offline');
     const lastp = (v.last_lat && v.last_lon)
       ? `${Number(v.last_lat).toFixed(5)}, ${Number(v.last_lon).toFixed(5)}${v.last_ts?`<br><span class="muted">${v.last_ts}</span>`:''}`
       : '<span class="muted">—</span>';
-
     tr.innerHTML = `
-      <td>${v.id ?? ''}</td>
+      <td>${v.id}</td>
       <td>${v.name||''}</td>
       <td>${v.plate||''}</td>
       <td>${v.driver||''}</td>
@@ -155,13 +152,19 @@ async function load(){
       <td>${v.imei || ''}</td>
       <td>${v.tags||''}</td>
       <td class="right">
-        <button class="btn ghost" onclick='edit(${JSON.stringify(v)})'>Editar</button>
+        <button class="btn ghost" data-idx="${idx}" onclick="onEdit(this)">Editar</button>
         <button class="btn red"   onclick='delVeh(${JSON.stringify(v.id)})'>Excluir</button>
       </td>
     `;
     TBL.appendChild(tr);
-  }
+  });
   info.textContent = `${CURRENT.length} veículo(s)`;
+}
+
+function onEdit(btn){
+  const idx = Number(btn.getAttribute('data-idx'));
+  const v = CURRENT[idx] || {};
+  edit(v);
 }
 
 function openModal(){
@@ -169,23 +172,20 @@ function openModal(){
   resetForm();
 }
 
-function closeModal(){
-  document.getElementById('modal').style.display='none';
-}
+function closeModal(){ document.getElementById('modal').style.display='none'; }
 
 function resetForm(){
-  EDIT_ID = null;
-  document.getElementById('m_id_hidden').value = "";
-  m_name.value=""; m_plate.value=""; m_driver.value="";
+  m_id.value="(auto)"; m_name.value=""; m_plate.value=""; m_driver.value="";
   m_capacity.value=""; m_status.value="offline"; m_obd.value="";
   m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
   m_imei.value=""; m_vendor.value="";
+  m_id.dataset.realId = ""; // <-- limpa id real
 }
 
 function edit(v){
   document.getElementById('modal').style.display='flex';
-  EDIT_ID = v.id;
-  document.getElementById('m_id_hidden').value = v.id ?? "";
+  m_id.value = v.id;                // exibimos
+  m_id.dataset.realId = v.id;       // guardamos o id real p/ PATCH/DELETE
   m_name.value=v.name||""; m_plate.value=v.plate||""; m_driver.value=v.driver||"";
   m_capacity.value=v.capacity??""; m_status.value=v.status||"offline"; m_obd.value=v.obd_id||"";
   m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
@@ -194,6 +194,7 @@ function edit(v){
 }
 
 async function save(){
+  // monta payload SEM id (o backend gera/usa o dele)
   const body = {
     name: m_name.value.trim(),
     plate: m_plate.value.trim(),
@@ -214,9 +215,10 @@ async function save(){
     return;
   }
 
-  const isEdit = !!EDIT_ID;
-  const url    = isEdit ? `/api/fleet/vehicles/${encodeURIComponent(EDIT_ID)}` : '/api/fleet/vehicles';
+  const realId = m_id.dataset.realId;               // <-- se tem id, é edição
+  const isEdit = !!realId;
   const method = isEdit ? 'PATCH' : 'POST';
+  const url    = isEdit ? `/api/fleet/vehicles/${encodeURIComponent(realId)}` : '/api/fleet/vehicles';
 
   const res = await fetch(url, {
     method,
@@ -237,18 +239,15 @@ async function save(){
 }
 
 async function delVeh(id){
-  if (id == null || id === "") { alert("ID inválido."); return; }
   if(!confirm(`Excluir veículo ${id}?`)) return;
-
   const r = await fetch(`/api/fleet/vehicles/${encodeURIComponent(id)}`, {
     method:'DELETE',
     credentials:'include'
   });
-
   if(!r.ok){
     let msg = 'Erro ao excluir.';
     try { const j = await r.json(); if (j && j.error) msg = j.error; } catch(_){}
-    alert(msg); // evita 404 por enviar "V2" etc — sempre usamos o id real
+    alert(msg);
     return;
   }
   await load();
@@ -263,12 +262,14 @@ async function doImport(){
 
   let rows = [];
   try{
-    if(txt.startsWith('[')){ rows = JSON.parse(txt); }
-    else { rows = csvParse(txt); }
+    if(txt.startsWith('[')){ // JSON
+      rows = JSON.parse(txt);
+    }else{ // CSV simples (sem coluna id)
+      rows = csvParse(txt);
+    }
   }catch(e){
     alert("Formato inválido."); return;
   }
-
   const r = await fetch('/api/fleet/vehicles/import', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -290,7 +291,7 @@ function csvParse(s){
     ['capacity','next_service_km','last_service_km'].forEach(k=>{
       if(o[k]!==undefined && o[k]!=='') o[k] = Number(o[k]);
     });
-    if (o.imei && !/^\d{15}$/.test(o.imei)) o.imei = '';
+    if (o.imei && !/^\d{15}$/.test(o.imei)) o.imei = ''; // ignora inválido
     return o;
   });
 }
@@ -299,6 +300,7 @@ window.addEventListener('DOMContentLoaded', load);
 </script>
 </body>
 </html>
+
 
 
 
