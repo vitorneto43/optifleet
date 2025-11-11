@@ -366,31 +366,45 @@ def api_update_vehicle(vid):
 
 
 # ---------------------------------------------------------------------
-# DELETE - remover um veículo
+# DELETE - remover um veículo  (VERSÃO AJUSTADA)
+# Aceita ID digitado (string), ignora diferenças entre int/str,
+# e deleta mesmo se o vehicle estiver sem client_id antigo
 # ---------------------------------------------------------------------
 @bp_fleet.delete("/vehicles/<vid>")
 @login_required
 def api_delete_vehicle(vid):
     try:
         client_id = _client_id()
-        print(f"[DEBUG] DELETE /vehicles/{vid} - client_id: {client_id}")
+        print(f"[DEBUG] DELETE /vehicles/{vid} - client_id={client_id}")
 
-        # preferir função utilitária se já existente
-        if delete_vehicle:
-            ok = delete_vehicle(client_id, vid)
-            if not ok:
-                return _err("Veículo não encontrado", 404)
-        else:
-            with get_conn() as conn:
-                cur = conn.execute(
-                    "DELETE FROM vehicles WHERE client_id=? AND id=?",
-                    [client_id, vid],
-                )
-                conn.commit()
-                if cur.rowcount == 0:
-                    return _err("Veículo não encontrado", 404)
+        # força ID como string (importante para casos: V1, CARRO1, etc.)
+        vid_str = str(vid)
 
-        return _ok({"success": True, "id": vid})
+        with get_conn() as conn:
+            # 1) tenta remover veículo exato do usuário
+            cur = conn.execute(
+                "DELETE FROM vehicles WHERE (id = ? OR CAST(id AS TEXT) = ?) AND client_id = ?",
+                [vid_str, vid_str, client_id]
+            )
+            conn.commit()
+
+            if cur.rowcount > 0:
+                print(f"[DEBUG] DELETE - removido do usuário normal")
+                return _ok({"success": True, "id": vid_str})
+
+            # 2) fallback: remover veículos antigos sem client_id (dados velhos)
+            cur2 = conn.execute(
+                "DELETE FROM vehicles WHERE (id = ? OR CAST(id AS TEXT) = ?) AND (client_id IS NULL OR client_id = 0)",
+                [vid_str, vid_str]
+            )
+            conn.commit()
+
+            if cur2.rowcount > 0:
+                print("[DEBUG] DELETE - veículo antigo sem client_id removido")
+                return _ok({"success": True, "id": vid_str, "legacy": True})
+
+        print("[DEBUG] DELETE - nada encontrado")
+        return _err("Veículo não encontrado (ID não pertence ao usuário)", 404)
 
     except Exception as e:
         print(f"[ERROR] DELETE /vehicles/{vid}: {e}")
@@ -429,6 +443,7 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 
 
