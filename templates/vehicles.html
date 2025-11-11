@@ -9,7 +9,7 @@
   <style>
     .wrap{max-width:1100px;margin:18px auto;padding:0 16px}
     .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
-    .toolbar input,.toolbar select{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff}
+    .toolbar input, .toolbar select{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff}
     table{width:100%;border-collapse:collapse}
     th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left;font-size:14px}
     .badge{padding:4px 8px;border-radius:999px;font-size:12px}
@@ -24,7 +24,7 @@
     .modal>div{background:#111827;border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;max-width:560px;width:100%}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .grid label{font-size:12px;color:var(--muted)}
-    .grid input,.grid textarea{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff;width:100%}
+    .grid input, .grid textarea{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0b132b;color:#fff;width:100%}
     .muted{color:var(--muted)}
   </style>
 </head>
@@ -46,7 +46,7 @@
 
   <div class="wrap">
     <div class="toolbar">
-      <input id="q" placeholder="Buscar por nome, placa, motorista ou tag" oninput="load()">
+      <input id="q" placeholder="Buscar por id, nome, placa, driver ou tag" oninput="load()">
       <select id="status" onchange="load()">
         <option value="">Status (todos)</option>
         <option value="online">Online</option>
@@ -61,7 +61,7 @@
     <table id="tbl">
       <thead>
         <tr>
-          <th>Nome</th><th>Placa</th><th>Motorista</th><th>Cap.</th><th>Status</th>
+          <th>ID</th><th>Nome</th><th>Placa</th><th>Motorista</th><th>Cap.</th><th>Status</th>
           <th>Última posição</th><th>Próx. serv. (km)</th><th>IMEI</th><th>Tags</th><th></th>
         </tr>
       </thead>
@@ -74,6 +74,8 @@
     <div>
       <h3 id="mTitle">Veículo</h3>
       <div class="grid">
+        <!-- guardamos o ID real como data-attr no próprio modal -->
+        <input id="m_id_hidden" type="hidden" value="">
         <div><label>Nome</label><input id="m_name"></div>
         <div><label>Placa</label><input id="m_plate"></div>
         <div><label>Motorista</label><input id="m_driver"></div>
@@ -118,8 +120,9 @@
 const TBL  = document.querySelector('#tbl tbody');
 const info = document.getElementById('info');
 
-let CURRENT = [];     // lista renderizada
-let EDIT_ID = null;   // id real do backend quando estiver editando
+// cache atual para edição estável
+let CURRENT = [];
+let EDIT_ID = null; // id real em edição
 
 async function load(){
   const q  = document.getElementById('q').value.trim();
@@ -128,22 +131,24 @@ async function load(){
   if(q)  qs.set('q', q);
   if(st) qs.set('status', st);
 
-  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`, { credentials:'include' });
-  const data = await r.json();
+  const r = await fetch(`/api/fleet/vehicles?${qs.toString()}`, { credentials: 'include' });
+  const data = await r.json().catch(()=>[]);
   CURRENT = Array.isArray(data) ? data : [];
 
   TBL.innerHTML = "";
-  CURRENT.forEach((v) => {
+  for (const v of CURRENT){
     const tr = document.createElement('tr');
     const badge = v.status === 'online' ? 'b-online' : (v.status==='maintenance'?'b-maint':'b-offline');
     const lastp = (v.last_lat && v.last_lon)
       ? `${Number(v.last_lat).toFixed(5)}, ${Number(v.last_lon).toFixed(5)}${v.last_ts?`<br><span class="muted">${v.last_ts}</span>`:''}`
       : '<span class="muted">—</span>';
+
     tr.innerHTML = `
+      <td>${v.id ?? ''}</td>
       <td>${v.name||''}</td>
       <td>${v.plate||''}</td>
       <td>${v.driver||''}</td>
-      <td>${v.capacity ?? ''}</td>
+      <td>${v.capacity??''}</td>
       <td><span class="badge ${badge}">${v.status||'offline'}</span></td>
       <td>${lastp}</td>
       <td>${v.next_service_km ?? 0}</td>
@@ -155,7 +160,7 @@ async function load(){
       </td>
     `;
     TBL.appendChild(tr);
-  });
+  }
   info.textContent = `${CURRENT.length} veículo(s)`;
 }
 
@@ -164,10 +169,13 @@ function openModal(){
   resetForm();
 }
 
-function closeModal(){ document.getElementById('modal').style.display='none'; }
+function closeModal(){
+  document.getElementById('modal').style.display='none';
+}
 
 function resetForm(){
   EDIT_ID = null;
+  document.getElementById('m_id_hidden').value = "";
   m_name.value=""; m_plate.value=""; m_driver.value="";
   m_capacity.value=""; m_status.value="offline"; m_obd.value="";
   m_tags.value=""; m_nextkm.value="0"; m_lastkm.value="0"; m_notes.value="";
@@ -176,11 +184,13 @@ function resetForm(){
 
 function edit(v){
   document.getElementById('modal').style.display='flex';
-  EDIT_ID = v.id; // guarda o id real do backend
+  EDIT_ID = v.id;
+  document.getElementById('m_id_hidden').value = v.id ?? "";
   m_name.value=v.name||""; m_plate.value=v.plate||""; m_driver.value=v.driver||"";
-  m_capacity.value=v.capacity ?? ""; m_status.value=v.status || "offline"; m_obd.value=v.obd_id||"";
-  m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km ?? 0; m_lastkm.value=v.last_service_km ?? 0; m_notes.value=v.notes||"";
-  m_imei.value=v.imei || ""; m_vendor.value=v.vendor || "";
+  m_capacity.value=v.capacity??""; m_status.value=v.status||"offline"; m_obd.value=v.obd_id||"";
+  m_tags.value=v.tags||""; m_nextkm.value=v.next_service_km??0; m_lastkm.value=v.last_service_km??0; m_notes.value=v.notes||"";
+  m_imei.value = v.imei || "";
+  m_vendor.value = v.vendor || "";
 }
 
 async function save(){
@@ -198,39 +208,48 @@ async function save(){
     imei: m_imei.value.trim(),
     vendor: m_vendor.value.trim()
   };
+
   if (body.imei && !/^\d{15}$/.test(body.imei)) {
-    alert("IMEI deve ter 15 dígitos numéricos."); return;
+    alert("IMEI deve ter 15 dígitos numéricos.");
+    return;
   }
 
-  const isEdit = EDIT_ID !== null && EDIT_ID !== undefined;
+  const isEdit = !!EDIT_ID;
   const url    = isEdit ? `/api/fleet/vehicles/${encodeURIComponent(EDIT_ID)}` : '/api/fleet/vehicles';
   const method = isEdit ? 'PATCH' : 'POST';
 
   const res = await fetch(url, {
     method,
-    headers:{'Content-Type':'application/json'},
-    credentials:'include',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify(body)
   });
 
   if(!res.ok){
     let msg = 'Erro ao salvar.';
-    try{ const j=await res.json(); if(j && j.error) msg=j.error; }catch(_){}
-    alert(msg); return;
+    try { const j = await res.json(); if (j && j.error) msg = j.error; } catch(_){}
+    alert(msg);
+    return;
   }
-  closeModal(); await load();
+
+  closeModal();
+  await load();
 }
 
 async function delVeh(id){
+  if (id == null || id === "") { alert("ID inválido."); return; }
   if(!confirm(`Excluir veículo ${id}?`)) return;
+
   const r = await fetch(`/api/fleet/vehicles/${encodeURIComponent(id)}`, {
     method:'DELETE',
     credentials:'include'
   });
+
   if(!r.ok){
-    let msg='Erro ao excluir.';
-    try{ const j=await r.json(); if(j && j.error) msg=j.error; }catch(_){}
-    alert(msg); return;
+    let msg = 'Erro ao excluir.';
+    try { const j = await r.json(); if (j && j.error) msg = j.error; } catch(_){}
+    alert(msg); // evita 404 por enviar "V2" etc — sempre usamos o id real
+    return;
   }
   await load();
 }
@@ -246,7 +265,9 @@ async function doImport(){
   try{
     if(txt.startsWith('[')){ rows = JSON.parse(txt); }
     else { rows = csvParse(txt); }
-  }catch(e){ alert("Formato inválido."); return; }
+  }catch(e){
+    alert("Formato inválido."); return;
+  }
 
   const r = await fetch('/api/fleet/vehicles/import', {
     method:'POST',
@@ -278,4 +299,6 @@ window.addEventListener('DOMContentLoaded', load);
 </script>
 </body>
 </html>
+
+
 
