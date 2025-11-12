@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <title>Vincular Rastreador — OptiFleet</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0b132b;
+      color: white;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 {
+      color: #42a5f5;
+    }
+    form {
+      background: #1c2541;
+      border-radius: 10px;
+      padding: 20px;
+      max-width: 400px;
+      margin-top: 20px;
+    }
+    label {
+      display: block;
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    input, select, button {
+      width: 100%;
+      margin-top: 5px;
+      padding: 10px;
+      border-radius: 6px;
+      border: none;
+      font-size: 14px;
+    }
+    input, select {
+      background: #3a506b;
+      color: white;
+    }
+    button {
+      background: #42a5f5;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+      margin-top: 20px;
+    }
+    button:hover {
+      background: #64b5f6;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔗 Vincular Rastreador</h1>
+
+  <form id="linkForm">
+    <label>IMEI do rastreador:</label>
+    <input name="imei" placeholder="ex: 868683020145672" required>
+
+    <label>Token secreto (enviado junto com o rastreador):</label>
+    <input name="secret_token" placeholder="ex: 7yR2hN13Jq" required>
+
+    <label>Vincular ao veículo:</label>
+    <select name="vehicle_id" id="vehicleSelect"></select>
+
+    <button type="submit">Vincular rastreador</button>
+  </form>
+
+  <script>
+  // 🔹 Carrega a lista de veículos do usuário logado
+  async function carregarVeiculos(){
+    try {
+      const r = await fetch('/api/vehicles');
+      const data = await r.json();
+      const sel = document.getElementById('vehicleSelect');
+      data.forEach(v=>{
+        const opt = document.createElement('option');
+        opt.value = v.id;
+        opt.textContent = v.name;
+        sel.appendChild(opt);
+      });
+    } catch(e){
+      alert("Erro ao carregar veículos. Faça login novamente.");
+    }
+  }
+  carregarVeiculos();
+
+  // 🔹 Envia IMEI + token + vehicle_id
+  document.getElementById('linkForm').onsubmit = async (e)=>{
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target).entries());
+    const r = await fetch('/api/trackers/link',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const res = await r.json();
+    alert(res.ok ? '✅ Rastreador vinculado com sucesso!' : '❌ ' + res.error);
+  }
+  </script>
+</body>
+</html>
