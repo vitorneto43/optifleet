@@ -170,5 +170,3 @@ def api_vehicle_track(vehicle_id):
     return jsonify(out)
 
 
-
-
