@@ -809,9 +809,3 @@ def contact_save(name: str, email: str, company: str, message: str):
     con.close()
     return cid
 
-
-
-
-
-
-
