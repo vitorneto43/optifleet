@@ -110,25 +110,47 @@ def api_list_vehicles():
         # Converte para o formato esperado pelo frontend
         result = []
         for v in vehicles:
+            # Ordem real (baseada em vehicles.* + trackers.imei, trackers.vendor):
+            # 0: id
+            # 1: client_id        ← ignorado na resposta
+            # 2: name
+            # 3: plate
+            # 4: driver
+            # 5: capacity
+            # 6: tags
+            # 7: obd_id
+            # 8: last_lat
+            # 9: last_lon
+            # 10: last_speed
+            # 11: last_ts
+            # 12: status
+            # 13: last_service_km
+            # 14: last_service_date
+            # 15: next_service_km
+            # 16: notes
+            # 17: imei     (do LEFT JOIN)
+            # 18: vendor   (do LEFT JOIN)
+
             vehicle_data = {
                 "id": v[0],
-                "name": v[1],
-                "plate": v[2],
-                "driver": v[3],
-                "capacity": v[4],
-                "status": v[5],
-                "last_lat": v[6],
-                "last_lon": v[7],
-                "last_speed": v[8],
-                "last_ts": v[9],
-                "last_service_km": v[10],
-                "last_service_date": v[11],
-                "next_service_km": v[12],
-                "notes": v[13],
-                "tracker_id": v[14],
-                "imei": v[15],
-                "vendor": v[16],
+                "name": v[2],
+                "plate": v[3],
+                "driver": v[4],
+                "capacity": v[5],
+                "status": v[12],
+                "last_lat": v[8],
+                "last_lon": v[9],
+                "last_speed": v[10],
+                "last_ts": v[11],
+                "last_service_km": v[13],
+                "last_service_date": v[14],
+                "next_service_km": v[15],
+                "notes": v[16],
+                "imei": v[17],
+                "vendor": v[18],
+                # opcional: tracker_id == imei neste modelo, então pode omitir ou manter como v[17]
             }
+
             # Converte datetime para string
             if vehicle_data.get("last_ts"):
                 vehicle_data["last_ts"] = str(vehicle_data["last_ts"])
@@ -425,6 +447,7 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 
 
