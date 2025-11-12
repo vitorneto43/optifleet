@@ -69,9 +69,14 @@
 
   <script>
   // 🔹 Carrega a lista de veículos do usuário logado
-  async function carregarVeiculos(){
+    async function carregarVeiculos(){
     try {
-      const r = await fetch('/api/vehicles');
+      const r = await fetch('/api/vehicles', {
+        credentials: 'include'
+      });
+      if (!r.ok) {
+        throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+      }
       const data = await r.json();
       const sel = document.getElementById('vehicleSelect');
       data.forEach(v=>{
@@ -81,23 +86,29 @@
         sel.appendChild(opt);
       });
     } catch(e){
-      alert("Erro ao carregar veículos. Faça login novamente.");
+      alert("Erro ao carregar veículos: " + e.message);
+      console.error(e);
     }
   }
   carregarVeiculos();
 
-  // 🔹 Envia IMEI + token + vehicle_id
   document.getElementById('linkForm').onsubmit = async (e)=>{
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
-    const r = await fetch('/api/trackers/link',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body)
-    });
-    const res = await r.json();
-    alert(res.ok ? '✅ Rastreador vinculado com sucesso!' : '❌ ' + res.error);
+    try {
+      const r = await fetch('/api/trackers/link',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+        credentials: 'include'
+      });
+      const res = await r.json();
+      alert(res.ok ? '✅ Rastreador vinculado com sucesso!' : '❌ ' + res.error);
+    } catch(e){
+      alert("Erro ao vincular: " + e.message);
+    }
   }
   </script>
 </body>
 </html>
+
