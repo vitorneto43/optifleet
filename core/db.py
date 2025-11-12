@@ -12,7 +12,7 @@ import random
 # =========================
 # Config / Conexão
 # =========================
-DB_PATH = Path(os.getenv("DUCKDB_PATH", "/var/opt/optifleet/optifleet.duckdb"))
+DB_PATH = Path(os.getenv("DUCKDB_PATH", "/var/data/optifleet/optifleet.duckdb"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 def get_conn():
@@ -792,6 +792,7 @@ def contact_save(name: str, email: str, company: str, message: str):
     """, [cid, name, email, company, message, now])
     con.close()
     return cid
+
 
 
 
