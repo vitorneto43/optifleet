@@ -302,11 +302,27 @@ def delete_vehicle(client_id: int, vehicle_id: str) -> bool:
         con.close()
 
 
-def list_vehicles(client_id: int, q: Optional[str]=None, only: Optional[str]=None):
+def list_vehicles(client_id: int, q: Optional[str] = None, only: Optional[str] = None):
     con = get_conn()
     base = """
       SELECT
-        v.*,
+        v.id,
+        v.client_id,
+        v.name,
+        v.plate,
+        v.driver,
+        v.capacity,
+        v.tags,
+        v.obd_id,
+        v.last_lat,
+        v.last_lon,
+        v.last_speed,
+        v.last_ts,
+        v.status,
+        v.last_service_km,
+        v.last_service_date,
+        v.next_service_km,
+        v.notes,
         t.imei   AS imei,
         t.vendor AS vendor
       FROM vehicles v
@@ -328,7 +344,7 @@ def list_vehicles(client_id: int, q: Optional[str]=None, only: Optional[str]=Non
         """
         qlike = f"%{q.lower()}%"
         args += [qlike, qlike, qlike, qlike, qlike]
-    if only in ("online","offline","maintenance"):
+    if only in ("online", "offline", "maintenance"):
         base += " AND v.status = ?"
         args += [only]
     base += " ORDER BY v.id"
@@ -792,6 +808,7 @@ def contact_save(name: str, email: str, company: str, message: str):
     """, [cid, name, email, company, message, now])
     con.close()
     return cid
+
 
 
 
