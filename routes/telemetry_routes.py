@@ -4,15 +4,11 @@ from flask_login import login_required, current_user
 from datetime import datetime, timezone
 import json, time
 
-# antes:
-# from core.db import get_tracker_owner, insert_telemetry, latest_positions, upsert_tracker
-
-# depois:
 from core.db import (
     get_tracker_owner, insert_telemetry, latest_positions,
-    tracker_get_or_create, tracker_bind_vehicle
+    tracker_get_or_create, tracker_bind_vehicle,
+    get_conn,  # ✅ IMPORTA get_conn
 )
-
 
 bp_tele = Blueprint("telemetry", __name__, url_prefix="/api")
 
@@ -25,7 +21,11 @@ def link_tracker():
     vehicle_id = str(data.get("vehicle_id", "")).strip() or None
     if not imei or not token:
         return jsonify({"ok": False, "error": "imei e secret_token são obrigatórios"}), 400
-    upsert_tracker(client_id=str(current_user.id), imei=imei, secret_token=token, vehicle_id=vehicle_id)
+
+    # ✅ usa as funções que você importou
+    tracker = tracker_get_or_create(client_id=str(current_user.id), imei=imei, secret_token=token)
+    if vehicle_id:
+        tracker_bind_vehicle(client_id=str(current_user.id), imei=imei, vehicle_id=vehicle_id)
     return jsonify({"ok": True})
 
 @bp_tele.post("/trackers/ingest")
@@ -45,12 +45,10 @@ def ingest():
         return jsonify({"ok": False, "error": "tracker/token inválidos"}), 403
     client_id, bound_vehicle = owner
 
-    # valida lat/lon
     if "lat" not in data or "lon" not in data:
         return jsonify({"ok": False, "error": "lat e lon são obrigatórios"}), 400
     try:
-        lat = float(data["lat"])
-        lon = float(data["lon"])
+        lat = float(data["lat"]); lon = float(data["lon"])
     except Exception:
         return jsonify({"ok": False, "error": "lat/lon inválidos"}), 400
 
@@ -87,7 +85,6 @@ def api_latest():
 @login_required
 def stream():
     client_id = str(current_user.id)
-
     def gen():
         try:
             while True:
@@ -106,14 +103,72 @@ def stream():
             return
         except Exception:
             time.sleep(2)
-
     return Response(
         gen(),
         mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no"
-        }
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
+
+# ✅ CORRIGIDO: sem /api extra; com filtro por dono; e nomes de coluna alinhados
+@bp_tele.get("/telemetry/last_many")
+@login_required
+def api_last_many():
+    ids = [int(x) for x in (request.args.get('ids') or '').split(',') if x.strip().isdigit()]
+    if not ids:
+        return jsonify([])
+
+    qmarks = ",".join("?" for _ in ids)
+    sql = f"""
+    WITH last_pos AS (
+      SELECT p.vehicle_id, MAX(p.id) AS last_id
+      FROM positions p
+      WHERE p.vehicle_id IN ({qmarks})
+      GROUP BY p.vehicle_id
+    )
+    SELECT v.id, v.name, v.imei,
+           p.lat AS lat, p.lon AS lon, p.speed AS speed, p.timestamp AS ts
+    FROM vehicles v
+    LEFT JOIN last_pos lp ON lp.vehicle_id = v.id
+    LEFT JOIN positions p ON p.id = lp.last_id
+    WHERE v.id IN ({qmarks}) AND v.owner_id = ?  -- 🔒 escopo por dono
+    ORDER BY v.id;
+    """
+    with get_conn() as conn:
+        rows = conn.execute(sql, (*ids, *ids, str(current_user.id))).fetchall()
+    # normaliza timestamp para ISO (caso venha string)
+    out = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("ts"), datetime):
+            d["ts"] = d["ts"].isoformat()
+        out.append(d)
+    return jsonify(out)
+
+# routes/telemetry_routes.py
+@bp_tele.get("/telemetry/<vehicle_id>")
+@login_required
+def api_vehicle_track(vehicle_id):
+    """Últimos 200 pontos do veículo (ajuste o LIMIT se quiser)."""
+    sql = """
+      SELECT lat, lon, timestamp AS ts
+      FROM positions
+      WHERE vehicle_id = ?
+      ORDER BY id DESC
+      LIMIT 200
+    """
+    with get_conn() as conn:
+        rows = conn.execute(sql, (int(vehicle_id),)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        # normaliza tipos
+        d["lat"] = float(d["lat"])
+        d["lon"] = float(d["lon"])
+        if hasattr(d["ts"], "isoformat"):
+            d["ts"] = d["ts"].isoformat()
+        out.append(d)
+    return jsonify(out)
+
+
 
 
