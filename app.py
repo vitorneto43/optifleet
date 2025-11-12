@@ -1330,7 +1330,35 @@ def api_veiculos():
     ]
     # Idealmente, você deve buscar do banco de dados
     return jsonify(vehicles)
+@app.post("/api/trackers/link")
+@login_required
+def api_trackers_link():
+    """
+    Vincula um rastreador (IMEI + token) a um veículo.
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "error": "Dados ausentes"}), 400
 
+        imei = data.get("imei")
+        secret_token = data.get("secret_token")
+        vehicle_id = data.get("vehicle_id")
+
+        if not imei or not secret_token or not vehicle_id:
+            return jsonify({"ok": False, "error": "IMEI, token ou veículo ausente"}), 400
+
+        # Aqui você deve implementar a lógica de vinculação
+        # Exemplo fictício:
+        # from core.db import vincular_rastreador
+        # vincular_rastreador(imei, secret_token, vehicle_id)
+
+        # Por enquanto, apenas simula sucesso
+        print(f"[link_tracker] IMEI={imei}, Token={secret_token}, Veículo={vehicle_id}")
+        return jsonify({"ok": True, "message": "Rastreador vinculado com sucesso!"})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 # -----------------------------------------------------------------------------
 # Blueprints
 # -----------------------------------------------------------------------------
@@ -1366,6 +1394,7 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
+
 
 
 
