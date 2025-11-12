@@ -1307,6 +1307,30 @@ def api_last_map():
         return jsonify({"ok": False, "map_url": ""}), 404
     return jsonify({"ok": True, "map_url": row[0]})
 
+@app.get("/api/vehicles")
+@login_required
+def api_veiculos():
+    """
+    Retorna lista de veículos do usuário logado.
+    Formato: [{"id": "V1", "name": "Fusca Azul"}, ...]
+    """
+    # Substitua esta lógica pela forma como os veículos são armazenados no seu sistema
+    # Exemplo fictício:
+    uid = int(current_user.id)
+    # Supondo que você tenha uma função que busque os veículos do usuário
+    # Exemplo:
+    # from core.db import get_vehicles_by_user
+    # vehicles = get_vehicles_by_user(uid)
+
+    # Por enquanto, exemplo estático
+    vehicles = [
+        {"id": "V1", "name": "Caminhão 1"},
+        {"id": "V2", "name": "Caminhão 2"},
+        {"id": "V3", "name": "Carro de Entrega"}
+    ]
+    # Idealmente, você deve buscar do banco de dados
+    return jsonify(vehicles)
+
 # -----------------------------------------------------------------------------
 # Blueprints
 # -----------------------------------------------------------------------------
@@ -1342,6 +1366,7 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
+
 
 
 
