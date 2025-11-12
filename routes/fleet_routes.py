@@ -375,42 +375,24 @@ def api_update_vehicle(vid):
 def api_delete_vehicle(vid):
     try:
         client_id = _client_id()
-        print(f"[DEBUG] DELETE /vehicles/{vid} - client_id={client_id}")
+        vid_str = str(vid).strip()
 
-        # força ID como string (importante para casos: V1, CARRO1, etc.)
-        vid_str = str(vid)
+        if not vid_str:
+            return _err("ID do veículo inválido", 400)
 
-        with get_conn() as conn:
-            # 1) tenta remover veículo exato do usuário
-            cur = conn.execute(
-                "DELETE FROM vehicles WHERE (id = ? OR CAST(id AS TEXT) = ?) AND client_id = ?",
-                [vid_str, vid_str, client_id]
-            )
-            conn.commit()
+        print(f"[DEBUG] DELETE /vehicles/{vid_str} - client_id={client_id}")
 
-            if cur.rowcount > 0:
-                print(f"[DEBUG] DELETE - removido do usuário normal")
-                return _ok({"success": True, "id": vid_str})
+        success = delete_vehicle(client_id, vid_str)
 
-            # 2) fallback: remover veículos antigos sem client_id (dados velhos)
-            cur2 = conn.execute(
-                "DELETE FROM vehicles WHERE (id = ? OR CAST(id AS TEXT) = ?) AND (client_id IS NULL OR client_id = 0)",
-                [vid_str, vid_str]
-            )
-            conn.commit()
-
-            if cur2.rowcount > 0:
-                print("[DEBUG] DELETE - veículo antigo sem client_id removido")
-                return _ok({"success": True, "id": vid_str, "legacy": True})
-
-        print("[DEBUG] DELETE - nada encontrado")
-        return _err("Veículo não encontrado (ID não pertence ao usuário)", 404)
+        if success:
+            return _ok({"success": True, "id": vid_str})
+        else:
+            return _err("Veículo não encontrado ou não pertence ao usuário", 404)
 
     except Exception as e:
         print(f"[ERROR] DELETE /vehicles/{vid}: {e}")
         print(traceback.format_exc())
         return _err("Erro interno ao remover veículo", 500)
-
 
 # ---------------------------------------------------------------------
 # Rota de debug para testar
@@ -443,6 +425,7 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 
 
