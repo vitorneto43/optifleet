@@ -462,7 +462,8 @@ def vehicles_page():
 @app.get("/tracking")
 @login_required
 def tracking():
-    return render_template("tracking.html")
+    return render_template("telemetry.html")  # <- troca o template
+
 
 @app.get("/contact")
 def contact_page():
@@ -1335,6 +1336,7 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
+
 
 
 
