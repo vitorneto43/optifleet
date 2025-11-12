@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <title>Checkout — OptiFleet</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="/static/css/site.css">
+  <style>
+    body{background:#0b132b;color:#fff;font-family:system-ui,Segoe UI,Arial}
+    .wrap{max-width:900px;margin:40px auto;padding:0 16px}
+    .box{background:#101932;border-radius:14px;padding:20px 22px;box-shadow:0 12px 28px rgba(0,0,0,.25);margin-bottom:18px}
+    h1{font-size:30px;margin-bottom:18px}
+    .muted{color:#9ba7c4;font-size:14px}
+    label{display:block;margin-bottom:6px}
+    input{width:100%;padding:10px 12px;border-radius:10px;border:0;background:#0b132b;color:#fff}
+    .row{display:flex;gap:14px;flex-wrap:wrap}
+    .btn{background:#3a86ff;border:0;border-radius:10px;padding:10px 16px;color:#fff;cursor:pointer;text-decoration:none;display:inline-block}
+    .btn-secondary{background:transparent;border:1px solid rgba(255,255,255,.4)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Checkout</h1>
+
+    <!-- RESUMO -->
+    <div class="box">
+      <h2 style="margin:0 0 14px 0;font-size:20px">Resumo</h2>
+
+      <p><b>Plano:</b> {{ plan_label }}</p>
+      <p><b>Cobrança:</b>
+        {% if billing in ['annual','anual','yearly'] %}
+          Anual (15% OFF)
+        {% else %}
+          Mensal
+        {% endif %}
+      </p>
+
+      <!-- AQUI MOSTRA EXATAMENTE O NÚMERO QUE VEIO -->
+      <p>
+        <b>Veículos:</b>
+        {% if vehicles == 1 %}
+          1 veículo
+        {% else %}
+          {{ vehicles }} veículos
+        {% endif %}
+      </p>
+
+      <p>
+        <b>Valor:</b>
+        R$ {{ '%.2f'|format(price)|replace('.',',') }}
+        {% if monthly_equiv %}
+          <span class="muted">(equiv. R$ {{ '%.2f'|format(monthly_equiv)|replace('.',',') }}/mês)</span>
+        {% else %}
+          <span class="muted">/mês</span>
+        {% endif %}
+      </p>
+
+      <p class="muted">O pagamento será processado pelo Asaas em ambiente seguro.</p>
+    </div>
+
+    <!-- FORM -->
+    <div class="box">
+      <h2 style="margin:0 0 14px 0;font-size:20px">Dados do pagador</h2>
+      <form method="post" action="{{ url_for('asaas.start_subscription_form') }}">
+        <!-- Esses 3 campos escondidos levam exatamente o que o servidor já calculou -->
+        <input type="hidden" name="plan" value="{{ plan }}">
+        <input type="hidden" name="billing" value="{{ billing }}">
+        <input type="hidden" name="vehicles" value="{{ vehicles }}">
+
+        <div class="row">
+          <div style="flex:1 1 240px">
+            <label for="name">Nome/Razão Social</label>
+            <input id="name" name="name" placeholder="Nome" required>
+          </div>
+          <div style="flex:1 1 240px">
+            <label for="email">Email</label>
+            <input id="email" name="email" placeholder="email@exemplo.com" required>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <div style="flex:1 1 180px">
+            <label for="cpfCnpj">CPF/CNPJ</label>
+            <input id="cpfCnpj" name="cpfCnpj" placeholder="CPF/CNPJ">
+          </div>
+          <div style="flex:1 1 180px">
+            <label for="phone">Telefone</label>
+            <input id="phone" name="phone" placeholder="Opcional">
+          </div>
+        </div>
+
+        <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
+          <button class="btn" type="submit">Prosseguir para pagamento (Asaas)</button>
+          <a href="{{ url_for('billing.pricing_page') }}" class="btn btn-secondary">← Voltar e ver preços</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

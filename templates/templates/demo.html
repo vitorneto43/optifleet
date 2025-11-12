@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OptiFleet — Demo</title>
+  <link rel="stylesheet" href="/static/css/site.css">
+</head>
+<body>
+  <header class="nav">
+    <div class="nav__wrap">
+      <a href="/site" class="brand">
+        <img src="/static/img/logo (2).png" class="brand__logo" alt="">
+        <span class="brand__name">OptiFleet</span>
+      </a>
+      <nav class="nav__links">
+        <a href="/site#beneficios">Benefícios</a>
+        <a href="/site#como-funciona">Como funciona</a>
+        <a href="/site#precos">Preços</a>
+        <a href="/login" class="btn btn--ghost">Entrar</a>
+        <a href="/register" class="btn">Começar</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="hero__content">
+      <h1>Veja uma prévia do OptiFleet</h1>
+      <p class="hero__subtitle">Uma demonstração rápida do que você terá ao assinar.</p>
+      <div class="hero__shot">
+        <img src="/static/img/dashboard-shot.png" alt="Prévia do dashboard">
+      </div>
+      <div class="hero__cta">
+        <a href="/site#precos" class="btn btn--xl">Ver planos</a>
+        <a href="/contact" class="btn btn--xl btn--ghost">Falar com vendas</a>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="footer__copy">© <span id="y"></span> OptiFleet</div>
+  </footer>
+  <script>document.getElementById('y').textContent=new Date().getFullYear()</script>
+</body>
+</html>

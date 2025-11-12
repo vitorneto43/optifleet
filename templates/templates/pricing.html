@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Planos — OptiFleet</title>
+<link rel="stylesheet" href="/static/css/site.css">
+<style>
+  body{background:#0b132b;color:#fff;font-family:system-ui,Arial}
+  .wrap{max-width:980px;margin:24px auto;padding:0 16px}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+  .card{background:#1c2541;border-radius:14px;padding:18px;box-shadow:0 10px 28px rgba(0,0,0,.28)}
+  .card h3{margin:0 0 4px}
+  .muted{color:#a0aec0}
+  .price{font-size:28px;font-weight:700;margin:4px 0}
+  .row{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
+  .btn{padding:10px 14px;border-radius:10px;border:0;background:#3a86ff;color:#fff;cursor:pointer;text-decoration:none;display:inline-block}
+  .switch{display:flex;gap:8px;align-items:center;margin:16px 0}
+  input[type=number], select{padding:8px;border-radius:10px;border:0}
+  .badge{background:rgba(255,255,255,.1);padding:4px 8px;border-radius:999px;font-size:12px}
+  @media (max-width:820px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Planos</h1>
+  <p class="muted">
+    Mensal fixo (R$ 399, R$ 1.499 e R$ 2.200).
+  </p>
+
+  <div class="grid">
+    <!-- START -->
+    <div class="card">
+      <h3>{{ plans['start']['name'] }} <span class="badge">até {{ plans['start']['max_vehicles'] }} veículos</span></h3>
+      <div class="price">{{ fmt(plans['start']['monthly']) }} <span class="muted">/mês</span></div>
+
+      <div class="switch">
+        <label for="v-start">Veículos</label>
+        <!-- start SEMPRE 1..5 -->
+        <input id="v-start" type="number" min="1" max="5" value="5" style="width:90px">
+        <select id="b-start">
+          <option value="monthly" selected>Mensal</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <a class="btn" href="javascript:void(0)" onclick="go('start')">Contratar</a>
+        <span class="muted">Pagamento por boleto</span>
+      </div>
+    </div>
+
+    <!-- PRO -->
+    <div class="card">
+      <h3>{{ plans['pro']['name'] }} <span class="badge">até {{ plans['pro']['max_vehicles'] }} veículos</span></h3>
+      <div class="price">{{ fmt(plans['pro']['monthly']) }} <span class="muted">/mês</span></div>
+
+      <div class="switch">
+        <label for="v-pro">Veículos</label>
+        <!-- pro SEMPRE 1..50 -->
+        <input id="v-pro" type="number" min="1" max="50" value="20" style="width:90px">
+        <select id="b-pro">
+          <option value="monthly" selected>Mensal</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <a class="btn" href="javascript:void(0)" onclick="go('pro')">Contratar</a>
+        <span class="muted">Pagamento por boleto</span>
+      </div>
+    </div>
+
+    <!-- ENTERPRISE -->
+    <!-- ENTERPRISE -->
+    <div class="card">
+      <h3>Enterprise <span class="badge">51+ veículos</span></h3>
+      <div class="price">
+        <span class="p p-m">R$ 2200</span>
+        <small>/mês</small>
+      </div>
+      <p class="muted">Para operações grandes. Você escolhe quantos veículos vão entrar.</p>
+
+      <div class="switch" style="flex-wrap:wrap">
+        <label for="v-enterprise">Veículos</label>
+        <!-- sem max, começa em 51 -->
+        <input id="v-enterprise" type="number" min="51" value="51" style="width:110px">
+        <!-- só mensal por enquanto -->
+        <select id="b-enterprise" style="display:none">
+          <option value="monthly" selected>Mensal</option>
+        </select>
+        <small class="muted">Digite 70, 84, 120… o que precisar.</small>
+      </div>
+
+      <div class="row">
+        <a class="btn" href="javascript:void(0)" onclick="go('enterprise')">Assinar Enterprise</a>
+        <span class="muted">Pagamento por boleto</span>
+      </div>
+    </div>
+
+
+  </div>
+
+  <div style="margin-top:16px">
+    <a href="{{ url_for('home') }}" class="btn" style="background:transparent;border:1px solid rgba(255,255,255,.25)">← Voltar</a>
+  </div>
+</div>
+
+<script>
+function go(plan, billingOverride) {
+  const vInput = document.getElementById(`v-${plan}`);
+  const bSelect = document.getElementById(`b-${plan}`);
+
+  let vehicles = 1;
+  if (vInput && vInput.value) {
+    vehicles = parseInt(vInput.value, 10);
+  }
+
+  // regras por plano
+  if (plan === 'start') {
+    if (isNaN(vehicles) || vehicles < 1) vehicles = 1;
+    if (vehicles > 5) vehicles = 5;
+  } else if (plan === 'pro') {
+    if (isNaN(vehicles) || vehicles < 1) vehicles = 1;
+    if (vehicles > 50) vehicles = 50;
+  } else if (plan === 'enterprise') {
+    // AQUI é o que você pediu: deixa passar o que o cliente digitou
+    if (isNaN(vehicles) || vehicles < 51) vehicles = 51;
+    // NÃO tem limite máximo
+  }
+
+  // por enquanto só mensal
+  const billing = billingOverride || (bSelect && bSelect.value ? bSelect.value : 'monthly');
+
+  const url = new URL('{{ url_for("billing.go_checkout") }}', window.location.origin);
+  url.searchParams.set('plan', plan);
+  url.searchParams.set('billing', billing);
+  url.searchParams.set('vehicles', vehicles);
+  window.location.href = url.toString();
+}
+</script>
+
+
+</body>
+</html>

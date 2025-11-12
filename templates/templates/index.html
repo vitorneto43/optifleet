@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="pt-br">
+
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OptiFleet — Dashboard</title>
+  <link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+  crossorigin=""
+/>
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin=""
+></script>
+  <!-- ✅ carrega seus estilos globais (onde está .kpis, .kpi-card, etc.) -->
+  <link rel="stylesheet" href="/static/css/site.css">
+  <style>
+    :root{--bg:#0b132b;--card:#1c2541;--ink:#fff;--muted:#a0aec0;--acc:#3a86ff}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,Arial;margin:0;background:var(--bg);color:var(--ink)}
+    header{padding:16px 24px;background:#111827;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.08)}
+    header h1{margin:0;font-size:20px}
+    nav a{color:#fff;text-decoration:none;margin-left:14px;opacity:.9}
+    nav a:hover{opacity:1;text-decoration:underline}
+
+    main{padding:24px;display:grid;grid-template-columns:420px 1fr;gap:24px}
+    @media (max-width: 960px){ main{grid-template-columns:1fr} }
+
+    .card{background:var(--card);border-radius:12px;padding:20px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+    label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
+    input,select{width:100%;padding:8px 10px;border-radius:8px;border:none;margin-bottom:14px;background:#0b132b;color:#fff}
+
+    .row,.row3{display:grid;gap:12px}
+    .row{grid-template-columns:1fr 1fr}
+    .row3{grid-template-columns:1fr 1fr 1fr}
+
+    table{width:100%;border-collapse:collapse;font-size:14px;margin-top:12px}
+    th,td{text-align:left;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1)}
+
+    .btn{background:var(--acc);border:0;color:#fff;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px}
+    .btn.secondary{background:#6c757d}
+
+    iframe{width:100%;height:min(60vh,520px);border:0;border-radius:12px;background:#0b132b;margin-top:12px}
+
+    .muted{color:var(--muted)}
+    .danger{color:#ff6b6b}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OptiFleet — Dashboard</h1>
+    <nav>
+      {% if current_user.is_authenticated %}
+        <span style="opacity:.8;margin-right:12px;">{{ current_user.email }}</span>
+        <a href="/app" style="color:#fff;margin-right:12px;text-decoration:none;">Dashboard</a>
+        <a href="/vehicles" style="color:#fff;margin-right:12px;text-decoration:none;">Frota</a>
+        <a href="/tracking" style="color:#fff;margin-right:12px;text-decoration:none;">Telemetria</a>
+        <a href="/account" style="color:#fff;margin-right:12px;text-decoration:none;">Minha conta</a>
+        <a href="/billing/pricing" style="color:#fff;margin-right:12px;text-decoration:none;">Planos</a>
+        <form method="post" action="/logout" style="display:inline;"><button class="btn secondary">Sair</button></form>
+      {% else %}
+
+        <a href="/login" class="btn">Entrar</a>
+      {% endif %}
+    </nav>
+
+  </header>
+
+  {% if trial %}
+    <div style="background:#1d4ed8;border-bottom:1px solid rgba(255,255,255,.2);color:#fff;padding:10px 16px;text-align:center">
+      Olá {{ current_user.email }}, seu <b>trial</b> expira em
+      <b>{{ days_left if days_left is not none else '?' }} dia(s)</b>.
+      <a href="/account" style="color:#ffd166;text-decoration:underline;margin-left:10px">Ative seu plano agora</a>
+    </div>
+  {% elif sub and sub[4] == 'active' %}
+    <div style="background:#065f46;border-bottom:1px solid rgba(255,255,255,.2);color:#d1fae5;padding:10px 16px;text-align:center">
+      Assinatura ativa (plano: {{ sub[1] }}, veículos: {{ sub[3] }}). <a href="/account" style="color:#a7f3d0;text-decoration:underline">Gerenciar</a>
+    </div>
+  {% else %}
+    <div style="background:#7c2d12;border-bottom:1px solid rgba(255,255,255,.2);color:#fff;padding:10px 16px;text-align:center">
+      Sem assinatura ativa. <a href="/account" style="color:#ffd166;text-decoration:underline">Iniciar trial / contratar</a>
+    </div>
+  {% endif %}
+
+
+  <section class="kpis">
+    <div class="kpi-card">
+      <span class="kpi-icon">🚚</span>
+      <div class="kpi-value">{{ (kpis.total_veiculos if kpis else 0) }}</div>
+      <div class="kpi-label">Veículos Ativos</div>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-icon">📍</span>
+      <div class="kpi-value">{{ (kpis.viagens_hoje if kpis else 0) }}</div>
+      <div class="kpi-label">Viagens Hoje</div>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-icon">📊</span>
+      <div class="kpi-value">{{ (kpis.viagens_semana if kpis else 0) }}</div>
+      <div class="kpi-label">Viagens na Semana</div>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-icon">⚠️</span>
+      <div class="kpi-value">{{ (kpis.alertas if kpis else 0) }}</div>
+      <div class="kpi-label">Alertas Recentes</div>
+    </div>
+  </section>
+
+  <section style="margin-top:16px">
+    <h3 style="margin:8px 0">Última roteirização</h3>
+    <div id="lastMapWrap" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+      <iframe id="lastMap" src="" width="100%" height="520" style="display:none;border:0"></iframe>
+      <div id="noMap" style="padding:12px;color:#6b7280">Nenhuma roteirização recente.</div>
+    </div>
+  </section>
+
+
+  <main>
+    {% if True %}
+
+      <!-- ✅ Usuário com acesso: mostra os formulários e resultados -->
+      <section class="card">
+        <h3>Depósito</h3>
+        <div class="row">
+          <div>
+            <label>Endereço (opcional se informar lat/lon)</label>
+            <input id="dep_address" placeholder="Rua ..., Cidade - UF">
+          </div>
+          <div class="row">
+            <div>
+              <label>Lat</label>
+              <input id="dep_lat" type="number" step="any" placeholder="-8.1735">
+            </div>
+            <div>
+              <label>Lon</label>
+              <input id="dep_lon" type="number" step="any" placeholder="-34.9176">
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Início janela</label>
+            <input id="dep_start" value="08:00">
+          </div>
+          <div>
+            <label>Fim janela</label>
+            <input id="dep_end" value="18:00">
+          </div>
+        </div>
+
+        <h3 style="margin-top:14px;">Veículos</h3>
+        <table id="vehTable">
+          <thead>
+            <tr>
+              <th>ID</th><th>Capacidade</th><th>Início</th><th>Fim</th>
+              <th>KM</th><th>Dias</th><th>Alertas</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <button class="btn secondary" onclick="addVehicle()">+ adicionar veículo</button>
+
+        <h3 style="margin-top:14px;">Paradas (clientes)</h3>
+        <table id="stopTable">
+          <thead>
+            <tr>
+              <th>ID</th><th>Veículo</th><th>Endereço</th><th>Lat</th><th>Lon</th>
+              <th>Demanda</th><th>Serv.(min)</th><th>TW início</th><th>TW fim</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <button class="btn secondary" onclick="addStop()">+ adicionar parada</button>
+
+        <h3 style="margin-top:14px;">Preferências</h3>
+        <div class="row">
+          <div>
+            <label>Objetivo</label>
+            <select id="objective">
+              <option value="min_cost">Minimizar custo</option>
+              <option value="min_time">Minimizar tempo</option>
+              <option value="min_distance">Minimizar distância</option>
+            </select>
+          </div>
+
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn" onclick="optimize()">Otimizar</button>
+          <button class="btn secondary" onclick="loadSample()">Carregar Exemplo</button>
+        </div>
+        <div id="msg" class="danger" style="margin-top:8px;"></div>
+      </section>
+
+      <section class="card">
+        <h3>Resultado</h3>
+        <div id="summary" class="muted">Preencha os formulários e clique em Otimizar.</div>
+        <div style="margin-top:12px;">
+          <iframe id="mapFrame" src=""></iframe>
+        </div>
+
+        <h3 style="margin-top:18px;">Rotas</h3>
+        <table id="routesTable">
+          <thead><tr><th>Veículo</th><th>Ordem (nós)</th><th>Tempo (min)</th><th>Dist (km)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+
+        <h3 style="margin-top:18px;">Manutenção</h3>
+        <table id="maintTable">
+          <thead><tr><th>Veículo</th><th>Risco</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+      <section class="card">
+        <div style="display:flex; gap:8px; margin:8px 0;">
+          <button class="btn secondary" onclick="fetch('/demo/start',{method:'POST'}).then(()=>loadLatestPositions())">Iniciar simulação (3 veículos)</button>
+          <button class="btn secondary" onclick="fetch('/demo/stop',{method:'POST'})">Parar simulação</button>
+        </div>
+      <h3 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <span>Rastreamento ao vivo</span>
+
+      <!-- Controles do histórico dentro do cabeçalho -->
+      <div class="hist-controls">
+        <label class="muted">Histórico</label>
+        <select id="histHours">
+          <option value="3">3h</option>
+          <option value="6" selected>6h</option>
+          <option value="12">12h</option>
+          <option value="24">24h</option>
+        </select>
+        <input id="histVehicle" placeholder="vehicle_id (opcional)">
+        <button class="btn secondary" onclick="drawHistory()">Mostrar</button>
+        <button class="btn secondary" onclick="exportHistory('csv')">Exportar CSV</button>
+        <button class="btn secondary" onclick="exportHistory('pdf')">Exportar PDF</button>
+        <button class="btn secondary" onclick="clearHistory()">Limpar</button>
+      </div>
+    </h3>
+
+    <div id="liveMap" style="height:420px;border-radius:12px;position:relative;"></div>
+
+    <!-- Legenda de eventos -->
+    <div class="map-legend">
+      <span>🟢 Início</span>
+      <span>🔴 Fim</span>
+      <span>⏸️ Parada</span>
+      <span>⚠️ Excesso</span>
+      <span>🔁 Manobra brusca</span>
+    </div>
+
+
+  </section>
+
+
+
+
+
+
+    {% endif %}
+  </main>
+
+
+<script>
+function q(id){ return document.getElementById(id); }
+
+function nextVehId(){
+  const rows = document.querySelectorAll("#vehTable tbody tr").length;
+  return "V" + (rows + 1);
+}
+function nextStopId(){
+  const rows = document.querySelectorAll("#stopTable tbody tr").length;
+  return "S" + (rows + 1);
+}
+
+function addVehicle(v){
+  if(!v){
+    v = {
+      id: nextVehId(), capacity:1200, start_time:"08:00", end_time:"18:00",
+      km_rodados:20000, dias:60, alertas:0
+    };
+  }
+  const tb = document.querySelector("#vehTable tbody");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input value="${v.id}"></td>
+    <td><input type="number" value="${v.capacity}"></td>
+    <td><input value="${v.start_time}"></td>
+    <td><input value="${v.end_time}"></td>
+    <td><input type="number" value="${v.km_rodados}"></td>
+    <td><input type="number" value="${v.dias}"></td>
+    <td><input type="number" value="${v.alertas}"></td>
+    <td><button class="btn secondary" onclick="this.closest('tr').remove()">remover</button></td>
+  `;
+  tb.appendChild(tr);
+}
+
+function addStop(s){
+  if(!s){
+    s = {
+      id: nextStopId(), vehicle:"", address:"", lat:"", lon:"",
+      demand:100, service_min:10, tw_start:"08:00", tw_end:"18:00"
+    };
+  }
+  const tb = document.querySelector("#stopTable tbody");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input value="${s.id}"></td>
+    <td><input placeholder="ex.: V1" value="${s.vehicle||""}"></td>
+    <td><input placeholder="Rua..., Cidade - UF" value="${s.address||""}"></td>
+    <td><input type="number" step="any" value="${s.lat??""}"></td>
+    <td><input type="number" step="any" value="${s.lon??""}"></td>
+    <td><input type="number" value="${s.demand??0}"></td>
+    <td><input type="number" value="${s.service_min??0}"></td>
+    <td><input value="${s.tw_start||"08:00"}"></td>
+    <td><input value="${s.tw_end||"18:00"}"></td>
+    <td><button class="btn secondary" onclick="this.closest('tr').remove()">remover</button></td>
+  `;
+  tb.appendChild(tr);
+}
+
+function loadSample(){
+  q('dep_address').value = "Av. Boa Viagem, Recife - PE";
+  q('dep_lat').value = "-8.1735";
+  q('dep_lon').value = "-34.9176";
+  q('dep_start').value = "08:00";
+  q('dep_end').value = "18:00";
+
+  document.querySelector("#vehTable tbody").innerHTML = "";
+  document.querySelector("#stopTable tbody").innerHTML = "";
+
+  addVehicle({id:"V1", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:22000, dias:45, alertas:0});
+  addVehicle({id:"V2", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:38000, dias:120, alertas:2});
+  addVehicle({id:"V3", capacity:1200, start_time:"08:00", end_time:"18:00", km_rodados:12000, dias:20, alertas:0});
+
+  addStop({id:"S1", address:"Praça do Marco Zero, Recife - PE", demand:200, service_min:10, tw_start:"09:00", tw_end:"12:00"});
+  addStop({id:"S2", address:"Rua da Aurora, Recife - PE", demand:300, service_min:10, tw_start:"10:00", tw_end:"16:00"});
+  addStop({id:"S3", address:"Shopping RioMar Recife", demand:250, service_min:10, tw_start:"08:30", tw_end:"14:00"});
+  addStop({id:"S4", address:"UFPE - Recife", demand:150, service_min:10, tw_start:"08:00", tw_end:"18:00"});
+}
+
+function buildPayload(){
+  const depot = {
+    address: q('dep_address').value.trim() || undefined,
+    lat: q('dep_lat').value ? parseFloat(q('dep_lat').value) : undefined,
+    lon: q('dep_lon').value ? parseFloat(q('dep_lon').value) : undefined,
+    start_window: q('dep_start').value || "08:00",
+    end_window: q('dep_end').value || "18:00",
+  };
+
+  const vehicles = [...document.querySelectorAll("#vehTable tbody tr")].map(tr=>{
+    const tds = tr.querySelectorAll("td input");
+    return {
+      id: tds[0].value, capacity: parseInt(tds[1].value||"0"),
+      start_time: tds[2].value, end_time: tds[3].value,
+      _km: parseFloat(tds[4].value||"0"), _dias: parseFloat(tds[5].value||"0"), _alertas: parseFloat(tds[6].value||"0"),
+    };
+  });
+
+  const stops = [...document.querySelectorAll("#stopTable tbody tr")].map(tr=>{
+    const t = tr.querySelectorAll("td input");
+    return {
+      id: t[0].value,
+      vehicle: t[1].value || undefined,
+      address: t[2].value || undefined,
+      lat: t[3].value ? parseFloat(t[3].value) : undefined,
+      lon: t[4].value ? parseFloat(t[4].value) : undefined,
+      demand: parseInt(t[5].value||"0"),
+      service_min: parseInt(t[6].value||"0"),
+      tw_start: t[7].value, tw_end: t[8].value
+    };
+  });
+
+  const telemetry = {};
+  vehicles.forEach(v=>{
+    telemetry[v.id] = { km_rodados: v._km, dias_desde_ultima_manutencao: v._dias, alertas_obd: v._alertas };
+    delete v._km; delete v._dias; delete v._alertas;
+  });
+
+  return {
+    depot, vehicles, stops,
+    objective: q('objective').value,
+    telemetry
+  };
+}
+
+function isValidStop(s){
+  const hasCoords = (typeof s.lat === 'number' && !isNaN(s.lat)) &&
+                    (typeof s.lon === 'number' && !isNaN(s.lon));
+  const hasAddress = !!s.address && s.address.trim().length > 8;
+  return hasCoords || hasAddress;
+}
+
+async function optimize(){
+  q('msg').textContent = "";
+  const body = buildPayload();
+
+  if(!((body.depot.lat && body.depot.lon) || (body.depot.address && body.depot.address.trim().length>8))){
+    q('msg').textContent = "Informe endereço completo OU lat/lon do depósito.";
+    return;
+  }
+  if(body.vehicles.length === 0 || body.stops.length === 0){
+    q('msg').textContent = "Adicione pelo menos 1 veículo e 1 parada.";
+    return;
+  }
+  const bad = body.stops.filter(s => !isValidStop(s));
+  if(bad.length){
+    q('msg').textContent = "Há paradas sem endereço completo nem lat/lon. Corrija e tente novamente.";
+    return;
+  }
+  const vehIds = new Set(body.vehicles.map(v=>String(v.id)));
+  const badVeh = body.stops.filter(s => s.vehicle && !vehIds.has(String(s.vehicle)));
+  if(badVeh.length){
+    q('msg').textContent = "Há paradas atribuídas a veículo inexistente. Limpe a coluna Veículo ou use V1, V2...";
+    return;
+  }
+
+  const res = await fetch('/optimize', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if(!res.ok){
+    q('msg').textContent = (data && data.message) ? data.message : "Erro durante a otimização.";
+    return;
+  }
+
+  const allEmpty = (data.routes || []).every(r =>
+    (r.nodes_abs && r.nodes_abs.length <= 2) || (r.nodes && r.nodes.length <= 2)
+  );
+  if(allEmpty){
+    q('msg').textContent = "Nenhuma parada foi atendida (rotas 0→0). Verifique endereços, veículo, janelas e capacidade.";
+  }
+
+  // resumo + mapa
+  q('summary').innerHTML = `
+    <div><b>Status:</b> ${data.status}</div>
+    <div><b>Tempo total:</b> ${data.total_time_min} min</div>
+    <div><b>Distância total:</b> ${data.total_dist_km} km</div>
+    <div><b>Mapa:</b> ${data.map_url ? `<a href="${data.map_url}" target="_blank" style="color:#ffd166">abrir em nova aba</a>` : '<span class="muted">não gerado</span>'}</div>
+  `;
+  q('mapFrame').src = data.map_url ? (data.map_url + '?t=' + Date.now()) : "";
+
+  // rotas
+  const tbody = document.querySelector('#routesTable tbody');
+  tbody.innerHTML = "";
+  (data.routes || []).forEach(r=>{
+    const seq = (r.nodes_abs || r.nodes || []).join(' ➜ ');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.vehicle_id}</td><td>${seq}</td><td>${r.time_min}</td><td>${r.dist_km}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  // manutenção
+  const mtbody = document.querySelector('#maintTable tbody');
+  mtbody.innerHTML = "";
+  (data.maintenance || []).forEach(m=>{
+    const color = (m.failure_risk>=0.7?'#ff6b6b':(m.failure_risk>=0.4?'#ffd166':'#06d6a0'));
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${m.vehicle_id}</td><td style="color:${color}">${m.failure_risk}</td>`;
+    mtbody.appendChild(tr);
+  });
+}
+
+
+  // ===== Live map (Leaflet) =====
+let liveMap, markers = {};
+
+function initLiveMap() {
+  if (liveMap) return;
+  liveMap = L.map('liveMap').setView([-8.05, -34.9], 11);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+  }).addTo(liveMap);
+}
+
+async function loadLatestPositions() {
+  const r = await fetch('/api/telemetry/latest');
+  const data = await r.json();
+  data.forEach(upsertMarker);
+  fitIfNeeded();
+}
+
+function upsertMarker(p) {
+  const id = p.vehicle_id;
+  const ll = [p.lat, p.lon];
+  const html = `<b>${id}</b><br>Vel.: ${Number(p.speed||0).toFixed(0)} km/h<br>Fuel: ${Number(p.fuel||0).toFixed(0)}%<br>${p.ts||""}`;
+
+  if (markers[id]) {
+    markers[id].setLatLng(ll).setPopupContent(html);
+  } else {
+    const m = L.marker(ll);
+    m.bindPopup(html);
+    m.addTo(liveMap);
+    markers[id] = m;
+  }
+}
+
+function fitIfNeeded() {
+  const ids = Object.keys(markers);
+  if (ids.length === 0) return;
+  const group = L.featureGroup(ids.map(k => markers[k]));
+  liveMap.fitBounds(group.getBounds().pad(0.2), {animate: false});
+}
+
+function startSSE() {
+  const es = new EventSource('/api/telemetry/stream');
+  es.onmessage = (e) => {
+    try {
+      const list = JSON.parse(e.data);
+      list.forEach(upsertMarker);
+    } catch (_){}
+  };
+}
+let historyLayer, eventsLayer, startMarker, endMarker;
+
+function clearHistory(){
+  if(historyLayer){ historyLayer.remove(); historyLayer = null; }
+  if(eventsLayer){ eventsLayer.remove(); eventsLayer = null; }
+  if(startMarker){ startMarker.remove(); startMarker = null; }
+  if(endMarker){ endMarker.remove(); endMarker = null; }
+}
+
+function makeIcon(emoji){
+  return L.divIcon({
+    html: `<div style="font-size:18px">${emoji}</div>`,
+    className: "evt-ico",
+    iconSize: [24,24],
+    iconAnchor: [12,12]
+  });
+}
+
+async function drawHistory(){
+  if(!liveMap) initLiveMap();
+  clearHistory();
+
+  const hours = parseInt(document.getElementById('histHours').value || "6", 10);
+  const vid = document.getElementById('histVehicle').value.trim();
+
+  // 1) trilha
+  const hUrl = `/api/telemetry/history?hours=${hours}${vid?`&vehicle_id=${encodeURIComponent(vid)}`:""}`;
+  const r1 = await fetch(hUrl);
+  const pts = await r1.json();
+  if(!Array.isArray(pts) || pts.length < 2){ alert("Sem pontos suficientes no período."); return; }
+
+  // agrupa por veículo, desenha linha por veículo
+  const groupByVehicle = {};
+  pts.forEach(p => {
+    (groupByVehicle[p.vehicle_id] ||= []).push(p);
+  });
+
+  const bounds = [];
+  historyLayer = L.layerGroup().addTo(liveMap);
+
+  Object.entries(groupByVehicle).forEach(([veh, arr])=>{
+    const latlngs = arr.map(p => [p.lat, p.lon]);
+    const poly = L.polyline(latlngs, {weight: 4, opacity: 0.9}).addTo(historyLayer);
+
+    // início/fim (apenas se filtrar 1 veículo)
+    if(Object.keys(groupByVehicle).length === 1){
+      startMarker = L.marker(latlngs[0], {icon: makeIcon("🟢")}).addTo(historyLayer).bindPopup(`<b>${veh}</b><br>Início<br>${arr[0].ts}`);
+      endMarker   = L.marker(latlngs[latlngs.length-1], {icon: makeIcon("🔴")}).addTo(historyLayer).bindPopup(`<b>${veh}</b><br>Fim<br>${arr[arr.length-1].ts}`);
+    }
+
+    latlngs.forEach(ll => bounds.push(ll));
+  });
+
+  if(bounds.length){ liveMap.fitBounds(bounds, {padding:[30,30]}); }
+
+  // 2) eventos
+  const eUrl = `/api/telemetry/events?hours=${hours}${vid?`&vehicle_id=${encodeURIComponent(vid)}`:""}`;
+  const r2 = await fetch(eUrl);
+  const evs = await r2.json();
+  if(!Array.isArray(evs)) return;
+
+  eventsLayer = L.layerGroup().addTo(liveMap);
+  evs.forEach(e=>{
+    let emoji = "📍";
+    if(e.type === "stop") emoji = "⏸️";
+    if(e.type === "overspeed") emoji = "⚠️";
+    if(e.type === "harsh_turn") emoji = "🔁";
+    const m = L.marker([e.lat, e.lon], {icon: makeIcon(emoji)}).addTo(eventsLayer);
+    const extra = e.type === "stop" ? `${e.minutes} min parado`
+               : e.type === "overspeed" ? `${Math.round(e.value)} km/h`
+               : e.type === "harsh_turn" ? `Δ rumo ${e.delta_deg}°`
+               : "";
+    m.bindPopup(`<b>${e.vehicle_id}</b><br>${e.type}<br>${extra}<br>${e.ts}`);
+  });
+}
+
+
+async function refreshKpis(){
+    try{
+      const r = await fetch('/api/kpis');
+      if(!r.ok) return;
+      const d = await r.json();
+      const els = document.querySelectorAll('.kpi-card .kpi-value');
+      if(els[0]) els[0].textContent = d.total_veiculos ?? 0;
+      if(els[1]) els[1].textContent = d.viagens_hoje ?? 0;
+      if(els[2]) els[2].textContent = d.viagens_semana ?? 0;
+      if(els[3]) els[3].textContent = d.alertas ?? 0;
+    }catch(e){}
+  }
+  refreshKpis();
+  setInterval(refreshKpis, 15000);
+
+function exportHistory(fmt){
+  const hours = parseInt(document.getElementById('histHours').value || "6", 10);
+  const vid = document.getElementById('histVehicle').value.trim();
+  const url = `/api/telemetry/export?fmt=${encodeURIComponent(fmt)}&hours=${hours}${vid?`&vehicle_id=${encodeURIComponent(vid)}`:""}`;
+  // abre em nova aba pra baixar
+  window.open(url, '_blank');
+}
+
+
+window.addEventListener('DOMContentLoaded', () => {
+  initLiveMap();
+  loadLatestPositions();
+  startSSE();
+});
+
+  async function loadLastMap() {
+  try {
+    const r = await fetch('/api/optimize/last_map', { credentials: 'same-origin' });
+    if (!r.ok) throw 0;
+    const { ok, map_url } = await r.json();
+    const iframe = document.getElementById('lastMap');
+    const noMap = document.getElementById('noMap');
+    if (ok && map_url) {
+      // cache-busting pra evitar servir HTML antigo
+      iframe.src = map_url + (map_url.includes('?') ? '&' : '?') + 'v=' + Date.now();
+      iframe.style.display = 'block';
+      noMap.style.display = 'none';
+    } else {
+      iframe.style.display = 'none';
+      noMap.style.display = 'block';
+    }
+  } catch {
+    // mantém a mensagem "Nenhuma roteirização recente"
+  }
+}
+
+// carrega automaticamente ao abrir o dashboard
+document.addEventListener('DOMContentLoaded', loadLastMap);
+</script>
+
+</body>
+</html>
+
