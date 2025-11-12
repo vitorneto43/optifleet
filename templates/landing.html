@@ -12,6 +12,31 @@
   <meta property="og:type" content="website">
   <meta property="og:image" content="/static/img/og-cover.jpg">
   <link rel="icon" href="/static/img/favicon.png">
+
+  <!-- 👇 CSS mínimo para comportamento do menu mobile -->
+  <style>
+    header.nav { position: sticky; top: 0; z-index: 3000; }
+    .nav__wrap { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    .nav__links { display:flex; gap:16px; }
+    .nav__burger { display:none; background:none; border:0; padding:8px; cursor:pointer; }
+    .nav__burger span { display:block; width:26px; height:3px; background:#fff; margin:4px 0; border-radius:2px; }
+
+    @media (max-width: 900px) {
+      .nav__links {
+        display: none;
+        position: absolute;
+        top: 64px;               /* altura do header */
+        left: 0; right: 0;
+        background: #0b1220;
+        padding: 12px 20px;
+        border-top: 1px solid rgba(255,255,255,.12);
+      }
+      .nav--open .nav__links { display: block; }
+      .nav__links a { display:block; padding:10px 0; }
+      .nav__burger { display:inline-flex; z-index:3001; }
+      body.no-scroll { overflow: hidden; }
+    }
+  </style>
 </head>
 <body>
   <!-- NAV -->
@@ -29,7 +54,7 @@
         <a href="/login" class="btn btn--ghost">Entrar</a>
         <a href="/register" class="btn">Começar</a>
       </nav>
-      <button class="nav__burger" id="burger" aria-label="Abrir menu">
+      <button class="nav__burger" id="burger" aria-label="Abrir menu" aria-expanded="false">
         <span></span><span></span><span></span>
       </button>
     </div>
@@ -285,6 +310,36 @@
     <div class="footer__copy">© <span id="y"></span> OptiFleet. Todos os direitos reservados.</div>
   </footer>
 
+  <!-- 👇 JS do menu mobile -->
+  <script>
+    (function () {
+      const header = document.querySelector('header.nav');
+      const burger = document.getElementById('burger');
+      const links  = header?.querySelector('.nav__links');
+
+      if (!burger || !header || !links) return;
+
+      function closeMenu() {
+        header.classList.remove('nav--open');
+        burger.setAttribute('aria-expanded', 'false');
+        document.body.classList.remove('no-scroll');
+      }
+
+      function toggleMenu() {
+        header.classList.toggle('nav--open');
+        const open = header.classList.contains('nav--open');
+        burger.setAttribute('aria-expanded', open ? 'true' : 'false');
+        document.body.classList.toggle('no-scroll', open);
+      }
+
+      burger.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu(); });
+      links.addEventListener('click', (e) => { if (e.target.matches('a')) closeMenu(); });
+      document.addEventListener('click', (e) => { if (!header.contains(e.target)) closeMenu(); });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+    })();
+  </script>
+
+  <!-- (já existia) JS dos preços/links -->
   <script>
   // pega os inputs
   const vStart       = document.getElementById('v-start');
@@ -336,3 +391,4 @@
 </script>
 </body>
 </html>
+
