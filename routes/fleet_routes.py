@@ -1,5 +1,6 @@
 # routes/fleet_routes.py
 from __future__ import annotations
+
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from datetime import datetime, timezone
@@ -13,6 +14,19 @@ from core.db import (
     delete_vehicle,
     tracker_bind_vehicle,
 )
+
+# ==== imports da parte de OTIMIZAÇÃO ====
+from core.models import (
+    Location,
+    TimeWindow,
+    Depot,
+    Vehicle,
+    Stop,
+    OptimizeRequest,
+    hhmm_to_minutes,
+)
+from core.providers.maps import RoutingProvider
+from core.solver.vrptw import solve_vrptw
 
 bp_fleet = Blueprint("fleet", __name__, url_prefix="/api/fleet")
 
@@ -389,8 +403,6 @@ def api_update_vehicle(vid):
 
 # ---------------------------------------------------------------------
 # DELETE - remover um veículo  (VERSÃO AJUSTADA)
-# Aceita ID digitado (string), ignora diferenças entre int/str,
-# e deleta mesmo se o vehicle estiver sem client_id antigo
 # ---------------------------------------------------------------------
 @bp_fleet.delete("/vehicles/<vid>")
 @login_required
@@ -415,6 +427,136 @@ def api_delete_vehicle(vid):
         print(f"[ERROR] DELETE /vehicles/{vid}: {e}")
         print(traceback.format_exc())
         return _err("Erro interno ao remover veículo", 500)
+
+
+# ---------------------------------------------------------------------
+# NOVA ROTA: OTIMIZAÇÃO DE ROTAS
+# ---------------------------------------------------------------------
+@bp_fleet.post("/optimize")
+@login_required
+def api_optimize():
+    """
+    Endpoint para otimizar rotas.
+
+    Espera um JSON no formato:
+    {
+      "objective": "min_cost",
+      "depot": {
+        "address": "...",
+        "start_window": "08:00",
+        "end_window": "18:00"
+      },
+      "vehicles": [
+        {
+          "id": "V1",
+          "capacity": 1200,
+          "start_time": "08:00",
+          "end_time": "18:00"
+        }
+      ],
+      "stops": [
+        {
+          "id": "S1",
+          "address": "...",
+          "demand": 100,
+          "service_window_start": "08:00",
+          "service_window_end": "18:00"
+        }
+      ],
+      "telemetry": {
+        "V1": {
+          "km_rodados": 20000,
+          "dias_desde_ultima_manutencao": 60,
+          "alertas_obd": 0
+        }
+      }
+    }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+
+        # --------- validações básicas ---------
+        try:
+            depot_raw = data["depot"]
+            vehicles_raw = data["vehicles"]
+        except KeyError as e:
+            return _err(f"Campo obrigatório ausente no payload: {e.args[0]}", 400)
+
+        stops_raw = data.get("stops", [])
+        if not isinstance(stops_raw, list) or len(stops_raw) == 0:
+            return _err(
+                "Nenhuma parada foi enviada. Adicione pelo menos uma parada antes de otimizar.",
+                400,
+            )
+
+        objective = data.get("objective", "min_cost")
+        telemetry_raw = data.get("telemetry", {})
+
+        # --------- monta depot ---------
+        depot_location = Location.from_address(depot_raw["address"])
+        depot_tw = TimeWindow(
+            start=hhmm_to_minutes(depot_raw.get("start_window", "08:00")),
+            end=hhmm_to_minutes(depot_raw.get("end_window", "18:00")),
+        )
+        depot = Depot(location=depot_location, time_window=depot_tw)
+
+        # --------- monta veículos ---------
+        vehicles: List[Vehicle] = []
+        for v in vehicles_raw:
+            v_tw = TimeWindow(
+                start=hhmm_to_minutes(v.get("start_time", "08:00")),
+                end=hhmm_to_minutes(v.get("end_time", "18:00")),
+            )
+            vehicles.append(
+                Vehicle(
+                    id=v["id"],
+                    capacity=int(v.get("capacity", 999999)),
+                    time_window=v_tw,
+                )
+            )
+
+        # --------- monta paradas ---------
+        stops: List[Stop] = []
+        for idx, s in enumerate(stops_raw):
+            loc = Location.from_address(s["address"])
+            tw = TimeWindow(
+                start=hhmm_to_minutes(
+                    s.get("service_window_start", depot_raw.get("start_window", "08:00"))
+                ),
+                end=hhmm_to_minutes(
+                    s.get("service_window_end", depot_raw.get("end_window", "18:00"))
+                ),
+            )
+            stops.append(
+                Stop(
+                    id=s.get("id") or f"S{idx+1}",
+                    location=loc,
+                    demand=int(s.get("demand", 0)),
+                    time_window=tw,
+                )
+            )
+
+        # --------- monta request de otimização ---------
+        opt_request = OptimizeRequest(
+            depot=depot,
+            vehicles=vehicles,
+            stops=stops,
+            objective=objective,
+            telemetry=telemetry_raw,
+        )
+
+        # --------- roda solver ---------
+        provider = RoutingProvider()
+        solution = solve_vrptw(opt_request, provider)
+
+        return _ok(solution, 200)
+
+    except Exception as e:
+        # Loga o erro completo no Render para depuração
+        print("[ERROR] POST /api/fleet/optimize:", str(e))
+        print(traceback.format_exc())
+        return _err("Falha interna ao otimizar rota.", 500)
+
 
 # ---------------------------------------------------------------------
 # Rota de debug para testar
@@ -447,6 +589,12 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+
+
+
+
+
 
 
 
