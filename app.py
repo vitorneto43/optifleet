@@ -1,5 +1,4 @@
 # app.py
-
 from pathlib import Path
 import os
 import time
@@ -1221,7 +1220,8 @@ def optimize():
     maps_dir = Path(app.static_folder) / "maps"
     maps_dir.mkdir(parents=True, exist_ok=True)
     map_path = maps_dir / f"route_{ts}.html"
-    map_rel = f"/static/maps/route_{ts}.html"
+    map_rel = f"/mapfile/route_{ts}.html"
+
 
     PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
     veh_ids = [v.id for v in req.vehicles]
@@ -1391,6 +1391,15 @@ def api_trackers_link():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.get("/mapfile/<name>")
+@login_required
+def serve_tmp_map(name):
+    filepath = Path("/tmp") / name
+    if not filepath.exists():
+        return "Mapa não encontrado", 404
+    return send_file(str(filepath), mimetype="text/html")
+
+
 # -----------------------------------------------------------------------------
 # Blueprints
 # -----------------------------------------------------------------------------
@@ -1426,9 +1435,6 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
-
-
-
 
 
 
