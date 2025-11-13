@@ -168,11 +168,12 @@
         <div class="row">
           <div>
             <label>Início janela</label>
-            <input id="dep_start" value="08:00">
+            <input id="dep_start" type="time" value="08:00">
           </div>
+
           <div>
-            <label>Fim janela</label>
-            <input id="dep_end" value="18:00">
+            <label>Duração máxima da rota (dias)</label>
+            <input id="dep_days" type="number" min="1" value="1">
           </div>
         </div>
 
@@ -361,7 +362,16 @@ function loadSample(){
   q('dep_lat').value = "-8.1735";
   q('dep_lon').value = "-34.9176";
   q('dep_start').value = "08:00";
-  q('dep_end').value = "18:00";
+
+  // se ainda existir dep_end em algum template antigo, mantém compatibilidade
+  if (q('dep_end')) {
+    q('dep_end').value = "18:00";
+  }
+
+  // 🔥 NOVO: duração máxima da rota em dias
+  if (q('dep_days')) {
+    q('dep_days').value = "1";
+  }
 
   document.querySelector("#vehTable tbody").innerHTML = "";
   document.querySelector("#stopTable tbody").innerHTML = "";
@@ -377,12 +387,26 @@ function loadSample(){
 }
 
 function buildPayload(){
+  const depStart = q('dep_start').value || "08:00";
+
+  // compat: se ainda existir dep_end, usa; senão mantém "18:00"
+  const depEndInput = q('dep_end');
+  const depEnd = (depEndInput && depEndInput.value) ? depEndInput.value : "18:00";
+
+  // 🔥 lê número de dias da rota (dep_days)
+  const depDaysInput = q('dep_days');
+  const maxDays = depDaysInput && depDaysInput.value
+    ? parseInt(depDaysInput.value, 10)
+    : 1; // padrão: 1 dia
+
   const depot = {
     address: q('dep_address').value.trim() || undefined,
     lat: q('dep_lat').value ? parseFloat(q('dep_lat').value) : undefined,
     lon: q('dep_lon').value ? parseFloat(q('dep_lon').value) : undefined,
-    start_window: q('dep_start').value || "08:00",
-    end_window: q('dep_end').value || "18:00",
+    start_window: depStart,
+    end_window: depEnd,
+    // 👇 campo novo que o backend pode usar pra permitir rota de vários dias
+    max_days: maxDays,
   };
 
   const vehicles = [...document.querySelectorAll("#vehTable tbody tr")].map(tr=>{
@@ -718,6 +742,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 </body>
 </html>
+
 
 
 
