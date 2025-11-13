@@ -124,8 +124,3 @@ def geocode_address(address: str) -> tuple[float, float]:
 
     # Se nenhum provedor retornou algo utilizável:
     raise GeocodingError(f"Endereço não encontrado: {address}")
-
-
-    # Detectar resultados genéricos: ex.: "São Paulo" sem número
-    disp = it
-
