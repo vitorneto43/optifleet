@@ -1,4 +1,5 @@
 # app.py
+
 from pathlib import Path
 import os
 import time
@@ -468,7 +469,6 @@ def tracking():
 @login_required
 def link_tracker_page():
     return render_template("link_tracker.html")
-
 
 
 @app.get("/contact")
@@ -1014,8 +1014,17 @@ def subscribe_shim():
 # -----------------------------------------------------------------------------
 def parse_request(payload) -> OptimizeRequest:
     depot = payload["depot"]
-    d_lat, d_lon = depot.get("lat"), depot.get("lon")
-    if (d_lat is None or d_lon is None) and depot.get("address"):
+
+    d_lat = depot.get("lat")
+    d_lon = depot.get("lon")
+
+    # trata None, string vazia e espaços como "sem coordenadas"
+    sem_coord_depot = (
+            d_lat is None or d_lon is None or
+            str(d_lat).strip() == "" or str(d_lon).strip() == ""
+    )
+
+    if sem_coord_depot and depot.get("address"):
         geo = rp.geocode(depot["address"])
         if not geo:
             raise ValueError(f"Não foi possível geocodificar o endereço do depósito: {depot['address']}")
@@ -1038,11 +1047,20 @@ def parse_request(payload) -> OptimizeRequest:
 
     stops = []
     for s in payload["stops"]:
-        s_lat, s_lon = s.get("lat"), s.get("lon")
-        if (s_lat is None or s_lon is None) and s.get("address"):
+        s_lat = s.get("lat")
+        s_lon = s.get("lon")
+
+        sem_coord_parada = (
+                s_lat is None or s_lon is None or
+                str(s_lat).strip() == "" or str(s_lon).strip() == ""
+        )
+
+        if sem_coord_parada and s.get("address"):
             geo = rp.geocode(s["address"])
             if not geo:
-                raise ValueError(f"Não foi possível geocodificar o endereço da parada {s.get('id','?')}: {s['address']}")
+                raise ValueError(
+                    f"Não foi possível geocodificar o endereço da parada {s.get('id', '?')}: {s['address']}"
+                )
             s_lat, s_lon = geo
 
         tw = None
@@ -1307,6 +1325,18 @@ def api_last_map():
         return jsonify({"ok": False, "map_url": ""}), 404
     return jsonify({"ok": True, "map_url": row[0]})
 
+@bp_fleet.post("/api/optimize")
+@login_required
+def api_optimize():
+    """
+    Alias para o mesmo fluxo de otimização usado em /optimize.
+    O frontend pode chamar /api/optimize com o mesmo payload JSON
+    e recebe exatamente a mesma resposta que em POST /optimize.
+    """
+    return optimize()
+
+
+
 @app.get("/api/vehicles")
 @login_required
 def api_veiculos():
@@ -1330,6 +1360,7 @@ def api_veiculos():
     ]
     # Idealmente, você deve buscar do banco de dados
     return jsonify(vehicles)
+
 @app.post("/api/trackers/link")
 @login_required
 def api_trackers_link():
@@ -1359,6 +1390,7 @@ def api_trackers_link():
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
 # -----------------------------------------------------------------------------
 # Blueprints
 # -----------------------------------------------------------------------------
@@ -1394,6 +1426,9 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
+
+
+
 
 
 
