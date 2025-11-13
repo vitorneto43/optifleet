@@ -11,8 +11,9 @@ from io import StringIO, BytesIO
 from dotenv import load_dotenv
 from flask import (
     Flask, request, jsonify, render_template,
-    redirect, url_for, flash, send_file
+    redirect, url_for, flash, send_file, abort
 )
+
 from flask_login import (
     LoginManager, login_required, current_user
 )
@@ -70,6 +71,11 @@ DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
 DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "15"))
 
 _last_audit_time = {}
+
+# === Diretórios base para os mapas ===
+BASE_DIR = Path(__file__).resolve().parent
+MAP_DIR = BASE_DIR / "mapfile"
+MAP_DIR.mkdir(exist_ok=True)
 # -----------------------------------------------------------------------------
 # SQL helpers (COMPATÍVEIS COM DUCKDB)
 # -----------------------------------------------------------------------------
@@ -1244,11 +1250,11 @@ def optimize():
         maintenance.append({"vehicle_id": v.id, "failure_risk": predict_failure_risk(tel)})
 
     ts = int(time.time())
-    maps_dir = Path(app.static_folder) / "maps"
-    maps_dir.mkdir(parents=True, exist_ok=True)
-    map_path = maps_dir / f"route_{ts}.html"
-    map_rel = f"/mapfile/route_{ts}.html"
+    filename = f"route_{ts}.html"
 
+    MAP_DIR.mkdir(exist_ok=True)
+    map_path = MAP_DIR / filename
+    map_rel = f"/mapfile/{filename}"
 
     PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
     veh_ids = [v.id for v in req.vehicles]
@@ -1330,6 +1336,7 @@ def optimize():
 
     return jsonify({
         "status": "ok",
+        "ok": True,  # 👈 compatível com o front antigo
         "routes": results,
         "total_time_min": total_time,
         "total_dist_km": total_dist,
@@ -1337,22 +1344,10 @@ def optimize():
         "map_url": map_rel if map_ok else ""
     })
 
+
 # ---------------------------------------------------------------------
 # Último mapa otimizado por cliente (usado no dashboard)
 # ---------------------------------------------------------------------
-@bp_fleet.get("/optimize/last_map")
-@login_required
-def api_optimize_last_map():
-    try:
-        client_id = _client_id()
-        url = _last_map_by_client.get(client_id)
-        if not url:
-            return jsonify({"ok": False, "map_url": None})
-        return jsonify({"ok": True, "map_url": url})
-    except Exception as e:
-        print("[ERROR] GET /api/fleet/optimize/last_map:", e)
-        print(traceback.format_exc())
-        return jsonify({"ok": False, "map_url": None}), 500
 
 
 @bp_fleet.post("/api/optimize")
@@ -1421,13 +1416,41 @@ def api_trackers_link():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.get("/mapfile/<name>")
-@login_required
-def serve_tmp_map(name):
-    filepath = Path("/tmp") / name
+
+@app.route("/mapfile/<path:filename>")
+@login_required   # se quiser proteger o mapa
+def serve_mapfile(filename):
+    """
+    Serve os arquivos HTML de rota gerados pelo solver.
+    Ex: /mapfile/route_1763037995.html
+    """
+    filepath = MAP_DIR / filename
     if not filepath.exists():
         return "Mapa não encontrado", 404
     return send_file(str(filepath), mimetype="text/html")
+
+import glob
+
+@app.route("/api/optimize/last_map", methods=["GET"])
+def api_optimize_last_map():
+    """
+    Retorna a URL do último mapa de rota gerado.
+    Usado pelo front quando ele quer reaproveitar o último resultado.
+    """
+    # Busca arquivos route_*.html em MAP_DIR
+    pattern = str(MAP_DIR / "route_*.html")
+    files = glob.glob(pattern)
+
+    if not files:
+        return jsonify({"ok": False, "error": "Nenhum mapa gerado ainda."}), 404
+
+    # Pega o mais recente pelo mtime
+    latest = max(files, key=os.path.getmtime)
+    filename = os.path.basename(latest)
+
+    map_url = url_for("serve_mapfile", filename=filename, _external=False)
+    return jsonify({"ok": True, "map_url": map_url})
+
 
 
 # -----------------------------------------------------------------------------
@@ -1465,6 +1488,13 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
+
+
+
+
+
+
+
 
 
 
