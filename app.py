@@ -7,6 +7,7 @@ from math import radians, sin, cos, sqrt, atan2
 import json
 import csv
 from io import StringIO, BytesIO
+import traceback  # para logs de erro
 
 from dotenv import load_dotenv
 from flask import (
@@ -50,9 +51,9 @@ from core.solver.vrptw import solve_vrptw
 from core.maintenance.predictor import predict_failure_risk
 from core.telemetry import salvar_telemetria
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # App / Config
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 load_dotenv()
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret-change-me")
@@ -70,9 +71,10 @@ DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
 DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "15"))
 
 _last_audit_time = {}
-# -----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------- #
 # SQL helpers (COMPATÍVEIS COM DUCKDB)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 def _dialect():
     """Identifica DuckDB explicitamente"""
     return "duckdb"  # Já sabemos que é DuckDB
@@ -104,9 +106,9 @@ def _has_column(conn, table, column):
     except Exception:
         return False
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Bootstrap admin em DuckDB (CORRIGIDO)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 def _bootstrap_duckdb_admin():
     from core.db import get_conn
     admin_email = os.getenv("ADMIN_EMAIL")
@@ -125,9 +127,9 @@ def _bootstrap_duckdb_admin():
 
 _bootstrap_duckdb_admin()
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Utils / Helpers
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 def _parse_dt_any(val):
     """Converte str/naive/aware -> aware UTC. Retorna None se não der."""
     if val is None:
@@ -263,9 +265,9 @@ def _iso_utc(dt):
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Login / Session
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 login_manager = LoginManager()
 login_manager.login_view = "auth.login_page"
 login_manager.init_app(app)
@@ -304,8 +306,9 @@ def inject_globals():
         "days_left": _days_left(trial),
     }
 
-
-# app.py - no before_request, ajuste a chamada:
+# ----------------------------------------------------------------------------- #
+# before_request: auditoria / expiração de trial
+# ----------------------------------------------------------------------------- #
 @app.before_request
 def _sync_trial_audit_and_expire():
     """
@@ -379,17 +382,17 @@ def _sync_trial_audit_and_expire():
                 trial_end=trial_end_str,
                 converted=is_converted,
             )
-        except Exception as e:
+        except Exception:
             # Log silencioso - não polui os logs
             pass
 
-    except Exception as e:
+    except Exception:
         # Log silencioso para erros gerais
         pass
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Infra inicial (tabelas auxiliares)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 with get_conn() as con:
     con.execute("""
         CREATE TABLE IF NOT EXISTS last_plans (
@@ -402,9 +405,9 @@ with get_conn() as con:
         );
     """)
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Assets / Providers
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 (Path(app.static_folder) / "maps").mkdir(parents=True, exist_ok=True)
 rp = RoutingProvider()
 
@@ -413,9 +416,9 @@ try:
 except Exception:
     pass
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Rotas simples
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 @app.get("/", endpoint="home")
 def home_public():
     if getattr(current_user, "is_authenticated", False):
@@ -445,6 +448,7 @@ def dashboard():
     ok_trial = (_trial_status_of(trial) == "active")
 
     if ok_sub or ok_trial:
+        # TODO: pegar KPIs reais do banco
         kpis = {"total_veiculos": 12, "viagens_hoje": 8, "viagens_semana": 43, "alertas": 3}
         return render_template("index.html", hide_paywall=True, kpis=kpis)
 
@@ -462,13 +466,12 @@ def vehicles_page():
 @app.get("/tracking")
 @login_required
 def tracking():
-    return render_template("telemetry.html")  # <- troca o template
+    return render_template("telemetry.html")
 
 @app.get("/link_tracker")
 @login_required
 def link_tracker_page():
     return render_template("link_tracker.html")
-
 
 @app.get("/contact")
 def contact_page():
@@ -480,7 +483,13 @@ def contact_submit():
     email = (request.form.get("email") or "").strip()
     company = (request.form.get("company") or "").strip()
     message = (request.form.get("message") or "").strip()
-    print("[CONTACT]", {"name": name, "email": email, "company": company, "message": message, "ip": request.remote_addr})
+    print("[CONTACT]", {
+        "name": name,
+        "email": email,
+        "company": company,
+        "message": message,
+        "ip": request.remote_addr
+    })
     flash("Recebemos sua mensagem. Em breve entraremos em contato.", "success")
     return redirect(url_for("contact_thanks"))
 
@@ -577,9 +586,9 @@ def admin_trials_backfill():
     trial_users_backfill_from_trials()
     return redirect(url_for("admin_trials"))
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # KPIs (compatível com DuckDB)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 @app.get("/api/kpis")
 @login_required
 def api_kpis():
@@ -645,9 +654,9 @@ def api_kpis():
         pass
     return jsonify(out)
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Telemetria (APIs) — consultas compatíveis com DuckDB
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 @app.get("/api/telemetry")
 @login_required
 def api_telemetry():
@@ -999,18 +1008,18 @@ def _export_pdf(pts, evs, hours, vehicle_id):
     fname = f"optifleet_{vehicle_id or 'all'}_{hours}h.pdf"
     return send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fname)
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Subscribe shim
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 @app.get("/subscribe")
 @login_required
 def subscribe_shim():
     qs = request.query_string.decode()
     return redirect(f"/billing/go?{qs}")
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Otimização / Roteirização
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 def parse_request(payload) -> OptimizeRequest:
     depot = payload["depot"]
 
@@ -1062,7 +1071,7 @@ def parse_request(payload) -> OptimizeRequest:
             try:
                 lat = float(s_lat)
                 lon = float(s_lon)
-            except:
+            except Exception:
                 lat = None
                 lon = None
         else:
@@ -1092,7 +1101,7 @@ def parse_request(payload) -> OptimizeRequest:
 
         stops.append(
             Stop(
-                id=s.get("id") or f"S{idx}",
+                id=s.get("id") or f"S{idx}"],
                 loc=Location(lat, lon),
                 demand=int(s.get("demand", 0)),
                 service_min=int(s.get("service_min", 0)),
@@ -1107,7 +1116,6 @@ def parse_request(payload) -> OptimizeRequest:
         objective=payload.get("objective", "min_cost"),
         include_tolls=bool(payload.get("include_tolls", True)),
     )
-
 
 @app.post("/optimize")
 @login_required
@@ -1247,8 +1255,8 @@ def optimize():
     maps_dir = Path(app.static_folder) / "maps"
     maps_dir.mkdir(parents=True, exist_ok=True)
     map_path = maps_dir / f"route_{ts}.html"
-    map_rel = f"/mapfile/route_{ts}.html"
-
+    # Agora o mapa é servido como arquivo estático diretamente
+    map_rel = f"/static/maps/route_{ts}.html"
 
     PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
     veh_ids = [v.id for v in req.vehicles]
@@ -1283,8 +1291,10 @@ def optimize():
 
             leg_coords: list[list[float]] = []
             try:
-                path = rp.leg_polyline(type("P", (), {"lat": o_lat, "lon": o_lon})(),
-                                       type("P", (), {"lat": d_lat, "lon": d_lon})())
+                path = rp.leg_polyline(
+                    type("P", (), {"lat": o_lat, "lon": o_lon})(),
+                    type("P", (), {"lat": d_lat, "lon": d_lon})()
+                )
                 leg_coords = _coerce_path_to_coords(path) or []
             except Exception:
                 leg_coords = []
@@ -1337,21 +1347,34 @@ def optimize():
         "map_url": map_rel if map_ok else ""
     })
 
-@app.get("/api/optimize/last_map")
+# --------------------------------------------------------------------- #
+# Último mapa otimizado por cliente (usado no dashboard)
+# --------------------------------------------------------------------- #
+@app.get("/api/fleet/optimize/last_map")
 @login_required
-def api_last_map():
-    uid = int(current_user.id)
-    row = get_conn().execute("""
-      SELECT map_url
-      FROM last_plans
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-      LIMIT 1
-    """, [uid]).fetchone()
-    if not row or not row[0]:
-        return jsonify({"ok": False, "map_url": ""}), 404
-    return jsonify({"ok": True, "map_url": row[0]})
+def api_optimize_last_map():
+    """
+    Retorna o último mapa de otimização do usuário logado.
+    Bate com o fetch('/api/fleet/optimize/last_map') no front.
+    """
+    try:
+        uid = int(current_user.id)
+        row = get_conn().execute("""
+            SELECT map_url
+            FROM last_plans
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, [uid]).fetchone()
+        if not row or not row[0]:
+            return jsonify({"ok": False, "map_url": None})
+        return jsonify({"ok": True, "map_url": row[0]})
+    except Exception as e:
+        print("[ERROR] GET /api/fleet/optimize/last_map:", e)
+        print(traceback.format_exc())
+        return jsonify({"ok": False, "map_url": None}), 500
 
+# Alias de API para o mesmo fluxo de /optimize
 @bp_fleet.post("/api/optimize")
 @login_required
 def api_optimize():
@@ -1362,8 +1385,9 @@ def api_optimize():
     """
     return optimize()
 
-
-
+# ----------------------------------------------------------------------------- #
+# APIs de veículos / rastreadores
+# ----------------------------------------------------------------------------- #
 @app.get("/api/vehicles")
 @login_required
 def api_veiculos():
@@ -1371,21 +1395,13 @@ def api_veiculos():
     Retorna lista de veículos do usuário logado.
     Formato: [{"id": "V1", "name": "Fusca Azul"}, ...]
     """
-    # Substitua esta lógica pela forma como os veículos são armazenados no seu sistema
-    # Exemplo fictício:
     uid = int(current_user.id)
-    # Supondo que você tenha uma função que busque os veículos do usuário
-    # Exemplo:
-    # from core.db import get_vehicles_by_user
-    # vehicles = get_vehicles_by_user(uid)
-
-    # Por enquanto, exemplo estático
+    # TODO: substituir por busca real no banco
     vehicles = [
         {"id": "V1", "name": "Caminhão 1"},
         {"id": "V2", "name": "Caminhão 2"},
         {"id": "V3", "name": "Carro de Entrega"}
     ]
-    # Idealmente, você deve buscar do banco de dados
     return jsonify(vehicles)
 
 @app.post("/api/trackers/link")
@@ -1406,12 +1422,7 @@ def api_trackers_link():
         if not imei or not secret_token or not vehicle_id:
             return jsonify({"ok": False, "error": "IMEI, token ou veículo ausente"}), 400
 
-        # Aqui você deve implementar a lógica de vinculação
-        # Exemplo fictício:
-        # from core.db import vincular_rastreador
-        # vincular_rastreador(imei, secret_token, vehicle_id)
-
-        # Por enquanto, apenas simula sucesso
+        # TODO: implementar lógica real de vinculação com banco
         print(f"[link_tracker] IMEI={imei}, Token={secret_token}, Veículo={vehicle_id}")
         return jsonify({"ok": True, "message": "Rastreador vinculado com sucesso!"})
 
@@ -1421,15 +1432,18 @@ def api_trackers_link():
 @app.get("/mapfile/<name>")
 @login_required
 def serve_tmp_map(name):
-    filepath = Path("/tmp") / name
+    """
+    Mantido por compatibilidade, mas agora lê de static/maps,
+    onde o build_map salva o HTML.
+    """
+    filepath = Path(app.static_folder) / "maps" / name
     if not filepath.exists():
         return "Mapa não encontrado", 404
     return send_file(str(filepath), mimetype="text/html")
 
-
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 # Blueprints
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
 app.register_blueprint(bp_auth)
 app.register_blueprint(bp_fleet)
 app.register_blueprint(bp_tele)
@@ -1445,21 +1459,12 @@ app.register_blueprint(bp_checkout)
 app.register_blueprint(bp_demo)
 app.register_blueprint(bp_account)
 
-# -----------------------------------------------------------------------------
-# Run (dev)
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# Run (compatível com Render)
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# Run (compatível com Render)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
+# Run (compatível com Render e local)
+# ----------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    # NO RENDER: use a porta da variável de ambiente PORT
-    port = int(os.environ.get("PORT", 10000))  # Render usa PORT, fallback 10000
-    # NO RENDER: sempre use 0.0.0.0
+    port = int(os.environ.get("PORT", 10000))
     host = "0.0.0.0"
-
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
 
