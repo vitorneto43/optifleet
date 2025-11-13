@@ -432,9 +432,12 @@ def api_delete_vehicle(vid):
 # ---------------------------------------------------------------------
 # NOVA ROTA: OTIMIZAÇÃO DE ROTAS
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# NOVA ROTA: OTIMIZAÇÃO DE ROTAS
+# ---------------------------------------------------------------------
 @bp_fleet.post("/optimize")
 @login_required
-def api_optimize():
+def api_optimize_v2():
     """
     Endpoint para otimizar rotas.
 
@@ -474,6 +477,8 @@ def api_optimize():
     """
     try:
         data = request.get_json(silent=True) or {}
+        ...
+
 
         # --------- validações básicas ---------
         try:
@@ -589,9 +594,6 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
-
-
-
 
 
 
