@@ -435,113 +435,169 @@ def api_delete_vehicle(vid):
 # ---------------------------------------------------------------------
 # NOVA ROTA: OTIMIZAÇÃO DE ROTAS
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# NOVA ROTA: OTIMIZAÇÃO DE ROTAS (versão robusta)
+# ---------------------------------------------------------------------
 @bp_fleet.post("/optimize")
 @login_required
-def api_optimize_v2():
+def api_optimize():
     """
-    Endpoint para otimizar rotas.
+    Endpoint para otimizar rotas a partir do dashboard.
 
-    Espera um JSON no formato:
-    {
-      "objective": "min_cost",
-      "depot": {
-        "address": "...",
-        "start_window": "08:00",
-        "end_window": "18:00"
-      },
-      "vehicles": [
-        {
-          "id": "V1",
-          "capacity": 1200,
-          "start_time": "08:00",
-          "end_time": "18:00"
-        }
-      ],
-      "stops": [
-        {
-          "id": "S1",
-          "address": "...",
-          "demand": 100,
-          "service_window_start": "08:00",
-          "service_window_end": "18:00"
-        }
-      ],
-      "telemetry": {
-        "V1": {
-          "km_rodados": 20000,
-          "dias_desde_ultima_manutencao": 60,
-          "alertas_obd": 0
+    Espera um JSON no formato (compatível com buildPayload do dashboard):
+
+      {
+        "objective": "min_cost" | "min_time" | "min_distance",
+        "depot": {
+          "address": "Rua ..., Cidade - UF",  # opcional se usar só lat/lon
+          "lat": -8.17,                       # opcional
+          "lon": -34.91,                      # opcional
+          "start_window": "08:00",
+          "end_window":   "18:00"
+        },
+        "vehicles": [
+          {
+            "id": "V1",
+            "capacity": 1200,
+            "start_time": "08:00",
+            "end_time":   "18:00"
+          }
+        ],
+        "stops": [
+          {
+            "id": "S1",
+            "vehicle": "V1" | null,
+            "address": "Praça do Marco Zero, Recife - PE",
+            "lat": -8.06,          # opcional
+            "lon": -34.87,         # opcional
+            "demand": 200,
+            "service_min": 10,
+            "tw_start": "09:00",   # ⬅ vem assim do front
+            "tw_end":   "12:00"
+          }
+        ],
+        "telemetry": {
+          "V1": {
+            "km_rodados": 22000,
+            "dias_desde_ultima_manutencao": 45,
+            "alertas_obd": 0
+          }
         }
       }
-    }
     """
     try:
         data = request.get_json(silent=True) or {}
-        ...
+        print("[DEBUG] /api/fleet/optimize payload:", data)
 
+        # --------- validações básicas do payload ---------
+        depot_raw = data.get("depot") or {}
+        vehicles_raw = data.get("vehicles") or []
+        stops_raw = data.get("stops") or []
 
-        # --------- validações básicas ---------
-        try:
-            depot_raw = data["depot"]
-            vehicles_raw = data["vehicles"]
-        except KeyError as e:
-            return _err(f"Campo obrigatório ausente no payload: {e.args[0]}", 400)
-
-        stops_raw = data.get("stops", [])
+        if not depot_raw:
+            return _err("Campo 'depot' é obrigatório.", 400)
+        if not vehicles_raw:
+            return _err("Envie pelo menos 1 veículo.", 400)
         if not isinstance(stops_raw, list) or len(stops_raw) == 0:
-            return _err(
-                "Nenhuma parada foi enviada. Adicione pelo menos uma parada antes de otimizar.",
-                400,
-            )
+            return _err("Envie pelo menos 1 parada.", 400)
 
         objective = data.get("objective", "min_cost")
-        telemetry_raw = data.get("telemetry", {})
+        telemetry_raw = data.get("telemetry", {}) or {}
 
-        # --------- monta depot ---------
-        depot_location = Location.from_address(depot_raw["address"])
+        # --------- monta DEPÓSITO ---------
+        depot_addr = (depot_raw.get("address") or "").strip()
+        # por enquanto, exigimos endereço (igual front já está usando)
+        if not depot_addr or len(depot_addr) < 8:
+            return _err("Endereço do depósito é obrigatório e deve ser completo.", 400)
+
+        try:
+            depot_location = Location.from_address(depot_addr)
+        except Exception as ge:
+            print("[ERROR] geocoding depot:", ge)
+            return _err(f"Não foi possível localizar o endereço do depósito: '{depot_addr}'.", 400)
+
         depot_tw = TimeWindow(
             start=hhmm_to_minutes(depot_raw.get("start_window", "08:00")),
             end=hhmm_to_minutes(depot_raw.get("end_window", "18:00")),
         )
         depot = Depot(location=depot_location, time_window=depot_tw)
 
-        # --------- monta veículos ---------
+        # --------- monta VEÍCULOS ---------
         vehicles: List[Vehicle] = []
         for v in vehicles_raw:
+            vid = v.get("id")
+            if not vid:
+                return _err("Todo veículo precisa de um 'id'.", 400)
+
             v_tw = TimeWindow(
-                start=hhmm_to_minutes(v.get("start_time", "08:00")),
-                end=hhmm_to_minutes(v.get("end_time", "18:00")),
+                start=hhmm_to_minutes(v.get("start_time", depot_raw.get("start_window", "08:00"))),
+                end=hhmm_to_minutes(v.get("end_time", depot_raw.get("end_window", "18:00"))),
             )
+
+            try:
+                cap = int(v.get("capacity", 0) or 0)
+            except Exception:
+                cap = 0
+
             vehicles.append(
                 Vehicle(
-                    id=v["id"],
-                    capacity=int(v.get("capacity", 999999)),
+                    id=str(vid),
+                    capacity=cap if cap > 0 else 999999,  # se vier 0, considera "sem limite"
                     time_window=v_tw,
                 )
             )
 
-        # --------- monta paradas ---------
+        # --------- monta PARADAS ---------
         stops: List[Stop] = []
         for idx, s in enumerate(stops_raw):
-            loc = Location.from_address(s["address"])
+            sid = s.get("id") or f"S{idx+1}"
+
+            # endereço da parada – seu dashboard manda como "address"
+            s_addr = (s.get("address") or "").strip()
+
+            if not s_addr or len(s_addr) < 8:
+                # aqui poderíamos tentar lat/lon, mas como o front exige endereço,
+                # vamos devolver erro claro pro usuário
+                return _err(
+                    f"Parada '{sid}' está sem endereço completo. "
+                    "Informe um endereço válido (Rua..., Cidade - UF).",
+                    400,
+                )
+
+            try:
+                loc = Location.from_address(s_addr)
+            except Exception as ge:
+                print(f"[ERROR] geocoding stop {sid}:", ge)
+                return _err(
+                    f"Não foi possível localizar o endereço da parada '{sid}': '{s_addr}'.",
+                    400,
+                )
+
             tw = TimeWindow(
+                # ⬇️ usa as chaves que o seu JS está mandando: tw_start / tw_end
                 start=hhmm_to_minutes(
-                    s.get("service_window_start", depot_raw.get("start_window", "08:00"))
+                    s.get("tw_start", depot_raw.get("start_window", "08:00"))
                 ),
                 end=hhmm_to_minutes(
-                    s.get("service_window_end", depot_raw.get("end_window", "18:00"))
+                    s.get("tw_end", depot_raw.get("end_window", "18:00"))
                 ),
             )
+
+            try:
+                demand = int(s.get("demand", 0) or 0)
+            except Exception:
+                demand = 0
+
             stops.append(
                 Stop(
-                    id=s.get("id") or f"S{idx+1}",
+                    id=str(sid),
                     location=loc,
-                    demand=int(s.get("demand", 0)),
+                    demand=demand,
                     time_window=tw,
                 )
             )
 
-        # --------- monta request de otimização ---------
+        # --------- monta request de OTIMIZAÇÃO ---------
         opt_request = OptimizeRequest(
             depot=depot,
             vehicles=vehicles,
@@ -550,15 +606,16 @@ def api_optimize_v2():
             telemetry=telemetry_raw,
         )
 
-        # --------- roda solver ---------
+        # --------- roda SOLVER ---------
         provider = RoutingProvider()
         solution = solve_vrptw(opt_request, provider)
 
+        print("[DEBUG] /api/fleet/optimize solution:", solution)
         return _ok(solution, 200)
 
     except Exception as e:
         # Loga o erro completo no Render para depuração
-        print("[ERROR] POST /api/fleet/optimize:", str(e))
+        print("[ERROR] POST /api/fleet/optimize (ERRO GERAL):", str(e))
         print(traceback.format_exc())
         return _err("Falha interna ao otimizar rota.", 500)
 
@@ -594,7 +651,6 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
-
 
 
 
