@@ -364,17 +364,30 @@ function buildPayload(){
 
   const stops = [...document.querySelectorAll("#stopTable tbody tr")].map(tr=>{
     const t = tr.querySelectorAll("td input");
+    const twStart = t[7].value || "08:00";
+    const twEnd   = t[8].value || "18:00";
+
     return {
       id: t[0].value,
       vehicle: t[1].value || undefined,
       address: t[2].value || undefined,
       lat: t[3].value ? parseFloat(t[3].value) : undefined,
       lon: t[4].value ? parseFloat(t[4].value) : undefined,
-      demand: parseInt(t[5].value||"0"),
-      service_min: parseInt(t[6].value||"0"),
-      tw_start: t[7].value, tw_end: t[8].value
+      demand: parseInt(t[5].value || "0"),
+
+      // duração do serviço (back hoje ignora, mas podemos mandar)
+      service_min: parseInt(t[6].value || "0"),
+
+      // nomes usados internamente no front (se você quiser reaproveitar depois)
+      tw_start: twStart,
+      tw_end: twEnd,
+
+      // ⚠️ nomes que o backend espera:
+      service_window_start: twStart,
+      service_window_end: twEnd,
     };
   });
+
 
   const telemetry = {};
   vehicles.forEach(v=>{
@@ -427,10 +440,14 @@ async function optimize(){
   });
 
   const data = await res.json();
-  if(!res.ok){
-    q('msg').textContent = (data && data.message) ? data.message : "Erro durante a otimização.";
+  if (!res.ok) {
+    const msg =
+      (data && (data.error || data.message)) ||
+      `Erro durante a otimização (HTTP ${res.status}).`;
+    q('msg').textContent = msg;
     return;
   }
+
 
   const allEmpty = (data.routes || []).every(r =>
     (r.nodes_abs && r.nodes_abs.length <= 2) || (r.nodes && r.nodes.length <= 2)
@@ -653,5 +670,7 @@ document.addEventListener('DOMContentLoaded', loadLastMap);
 
 </body>
 </html>
+
+
 
 
