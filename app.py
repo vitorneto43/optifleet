@@ -1014,73 +1014,100 @@ def subscribe_shim():
 def parse_request(payload) -> OptimizeRequest:
     depot = payload["depot"]
 
+    # =============== DEPÓSITO ==================
     d_lat = depot.get("lat")
     d_lon = depot.get("lon")
+    depot_addr = (depot.get("address") or depot.get("endereco") or "").strip()
 
-    # trata None, string vazia e espaços como "sem coordenadas"
-    sem_coord_depot = (
-            d_lat is None or d_lon is None or
-            str(d_lat).strip() == "" or str(d_lon).strip() == ""
-    )
-
-    if sem_coord_depot and depot.get("address"):
-        geo = rp.geocode(depot["address"])
+    if not d_lat or not d_lon:
+        if not depot_addr:
+            raise ValueError("Depósito sem coordenadas e sem endereço.")
+        geo = rp.geocode(depot_addr)
         if not geo:
-            raise ValueError(f"Não foi possível geocodificar o endereço do depósito: {depot['address']}")
+            raise ValueError(f"Não foi possível geocodificar o depósito: {depot_addr}")
         d_lat, d_lon = geo
 
     d = Depot(
         loc=Location(float(d_lat), float(d_lon)),
-        window=TimeWindow(hhmm_to_minutes(depot["start_window"]), hhmm_to_minutes(depot["end_window"]))
+        window=TimeWindow(
+            hhmm_to_minutes(depot.get("start_window", "00:00")),
+            hhmm_to_minutes(depot.get("end_window", "23:59")),
+        ),
     )
 
+    # =============== VEÍCULOS ==================
     vehicles = []
     for v in payload["vehicles"]:
-        vehicles.append(Vehicle(
-            id=v["id"],
-            capacity=int(v.get("capacity", 999999)),
-            start_min=hhmm_to_minutes(v.get("start_time", "00:00")),
-            end_min=hhmm_to_minutes(v.get("end_time", "23:59")),
-            speed_factor=float(v.get("speed_factor", 1.0))
-        ))
+        vehicles.append(
+            Vehicle(
+                id=v["id"],
+                capacity=int(v.get("capacity", 999999)),
+                start_min=hhmm_to_minutes(v.get("start_time", "00:00")),
+                end_min=hhmm_to_minutes(v.get("end_time", "23:59")),
+                speed_factor=float(v.get("speed_factor", 1.0)),
+            )
+        )
 
+    # =============== PARADAS ==================
     stops = []
-    for s in payload["stops"]:
+    for idx, s in enumerate(payload["stops"], start=1):
+
+        # Aceitar address OU endereco
+        s_addr = (s.get("address") or s.get("endereco") or "").strip()
         s_lat = s.get("lat")
         s_lon = s.get("lon")
 
-        sem_coord_parada = (
-                s_lat is None or s_lon is None or
-                str(s_lat).strip() == "" or str(s_lon).strip() == ""
-        )
+        # Caso 1: veio lat/lon válidos → usa direto
+        if s_lat not in (None, "", " ") and s_lon not in (None, "", " "):
+            try:
+                lat = float(s_lat)
+                lon = float(s_lon)
+            except:
+                lat = None
+                lon = None
+        else:
+            lat = None
+            lon = None
 
-        if sem_coord_parada and s.get("address"):
-            geo = rp.geocode(s["address"])
+        # Caso 2: veio endereço → geocodifica
+        if (lat is None or lon is None):
+            if not s_addr:
+                raise ValueError(
+                    f"Parada {s.get('id', f'S{idx}')} sem lat/lon e sem endereço."
+                )
+            geo = rp.geocode(s_addr)
             if not geo:
                 raise ValueError(
-                    f"Não foi possível geocodificar o endereço da parada {s.get('id', '?')}: {s['address']}"
+                    f"Não foi possível geocodificar a parada "
+                    f"{s.get('id', f'S{idx}')}: {s_addr}"
                 )
-            s_lat, s_lon = geo
+            lat, lon = geo
 
         tw = None
         if s.get("tw_start") and s.get("tw_end"):
-            tw = TimeWindow(hhmm_to_minutes(s["tw_start"]), hhmm_to_minutes(s["tw_end"]))
+            tw = TimeWindow(
+                hhmm_to_minutes(s["tw_start"]),
+                hhmm_to_minutes(s["tw_end"]),
+            )
 
-        stops.append(Stop(
-            id=s["id"],
-            loc=Location(float(s_lat), float(s_lon)),
-            demand=int(s.get("demand", 0)),
-            service_min=int(s.get("service_min", 0)),
-            window=tw
-        ))
+        stops.append(
+            Stop(
+                id=s.get("id") or f"S{idx}",
+                loc=Location(lat, lon),
+                demand=int(s.get("demand", 0)),
+                service_min=int(s.get("service_min", 0)),
+                window=tw,
+            )
+        )
 
     return OptimizeRequest(
         depot=d,
         vehicles=vehicles,
         stops=stops,
         objective=payload.get("objective", "min_cost"),
-        include_tolls=bool(payload.get("include_tolls", True))
+        include_tolls=bool(payload.get("include_tolls", True)),
     )
+
 
 @app.post("/optimize")
 @login_required
@@ -1435,6 +1462,7 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
+
 
 
 
