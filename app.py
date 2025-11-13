@@ -1119,6 +1119,20 @@ def parse_request(payload) -> OptimizeRequest:
 @login_required
 def optimize():
     raw = request.get_json(force=True)
+
+    # ==========================
+    # 🔥 NOVO: ler max_days do depot
+    # ==========================
+    dep_raw = (raw.get("depot") or {})
+    try:
+        max_days = int(dep_raw.get("max_days") or 1)
+    except (TypeError, ValueError):
+        max_days = 1
+    if max_days < 1:
+        max_days = 1
+    extra_minutes = (max_days - 1) * 24 * 60  # ex.: 3 dias => +2880 min
+    # ==========================
+
     try:
         req = parse_request(raw)
     except Exception as e:
@@ -1155,6 +1169,9 @@ def optimize():
     total_dist = 0.0
     veh_by_id = {v.id: v for v in req.vehicles}
 
+    # =====================================================
+    # FUNÇÃO AUXILIAR: já usando extra_minutes (multi-day)
+    # =====================================================
     def slice_and_solve(stops_subset, vehicles_subset):
         points = [req.depot] + stops_subset
         idx_map = [0] + [1 + req.stops.index(s) for s in stops_subset]
@@ -1170,18 +1187,43 @@ def optimize():
         depot_index = 0
         service_times = [0] + [s.service_min for s in stops_subset]
         demands = [0] + [s.demand for s in stops_subset]
-        time_windows = [(req.depot.window.start_min, req.depot.window.end_min)]
+
+        # 🔥 NOVO: estende a janela do depósito e dos clientes em extra_minutes
+        dep_w = req.depot.window
+        dep_start = dep_w.start_min
+        dep_end = dep_w.end_min + extra_minutes
+
+        time_windows = [(dep_start, dep_end)]
         for s in stops_subset:
             if s.window:
-                time_windows.append((s.window.start_min, s.window.end_min))
+                tw_start = s.window.start_min
+                tw_end = s.window.end_min + extra_minutes
             else:
-                time_windows.append((req.depot.window.start_min, req.depot.window.end_min))
+                tw_start = dep_start
+                tw_end = dep_end
+            time_windows.append((tw_start, tw_end))
+
+        # 🔥 NOVO: ajustar janela dos veículos também
+        vehicles_adj = []
+        for v in vehicles_subset:
+            vehicles_adj.append({
+                "id": v["id"],
+                "capacity": v["capacity"],
+                "start_min": v["start_min"],
+                "end_min": v["end_min"] + extra_minutes,
+            })
 
         return solve_vrptw(
-            time_matrix_min=tmat, dist_matrix_km=dmat,
-            depot_index=depot_index, service_times=service_times, demands=demands,
-            time_windows=time_windows, vehicles=vehicles_subset, objective=req.objective
+            time_matrix_min=tmat,
+            dist_matrix_km=dmat,
+            depot_index=depot_index,
+            service_times=service_times,
+            demands=demands,
+            time_windows=time_windows,
+            vehicles=vehicles_adj,
+            objective=req.objective
         )
+    # =====================================================
 
     def rr_partition(stops, vid_list):
         buckets = {vid: [] for vid in vid_list}
@@ -1200,7 +1242,12 @@ def optimize():
         for vid, v in veh_by_id.items():
             subset = stops_by_vehicle.get(vid, [])
             if subset:
-                veh_def = [{"id": v.id, "capacity": v.capacity, "start_min": v.start_min, "end_min": v.end_min}]
+                veh_def = [{
+                    "id": v.id,
+                    "capacity": v.capacity,
+                    "start_min": v.start_min,
+                    "end_min": v.end_min,
+                }]
                 r = slice_and_solve(subset, veh_def)
                 if r.get("status") != "ok":
                     return jsonify(r), 400
@@ -1215,14 +1262,28 @@ def optimize():
                     total_time += route["time_min"]
                     total_dist += route["dist_km"]
             else:
-                results.append({"vehicle_id": v.id, "nodes": [0,0], "nodes_abs": [0,0], "time_min": 0.0, "dist_km": 0.0})
+                results.append({
+                    "vehicle_id": v.id,
+                    "nodes": [0, 0],
+                    "nodes_abs": [0, 0],
+                    "time_min": 0.0,
+                    "dist_km": 0.0
+                })
     else:
         if has_assignment:
             for vcode, subset in stops_by_vehicle.items():
                 v = veh_by_id.get(vcode)
                 if not v:
-                    return jsonify({"status": "bad_request", "message": f"Veículo '{vcode}' não existe."}), 400
-                veh_def = [{"id": v.id, "capacity": v.capacity, "start_min": v.start_min, "end_min": v.end_min}]
+                    return jsonify({
+                        "status": "bad_request",
+                        "message": f"Veículo '{vcode}' não existe."
+                    }), 400
+                veh_def = [{
+                    "id": v.id,
+                    "capacity": v.capacity,
+                    "start_min": v.start_min,
+                    "end_min": v.end_min,
+                }]
                 r = slice_and_solve(subset, veh_def)
                 if r.get("status") != "ok":
                     return jsonify(r), 400
@@ -1232,7 +1293,12 @@ def optimize():
                     total_time += route["time_min"]
                     total_dist += route["dist_km"]
         else:
-            vehs = [{"id": v.id, "capacity": v.capacity, "start_min": v.start_min, "end_min": v.end_min} for v in req.vehicles]
+            vehs = [{
+                "id": v.id,
+                "capacity": v.capacity,
+                "start_min": v.start_min,
+                "end_min": v.end_min,
+            } for v in req.vehicles]
             r = slice_and_solve(req.stops, vehs)
             if r.get("status") != "ok":
                 return jsonify(r), 400
@@ -1246,8 +1312,14 @@ def optimize():
     telemetry_all = raw.get("telemetry", {})
     maintenance = []
     for v in req.vehicles:
-        tel = telemetry_all.get(v.id, {"km_rodados": 20000, "dias_desde_ultima_manutencao": 60, "alertas_obd": 0})
-        maintenance.append({"vehicle_id": v.id, "failure_risk": predict_failure_risk(tel)})
+        tel = telemetry_all.get(
+            v.id,
+            {"km_rodados": 20000, "dias_desde_ultima_manutencao": 60, "alertas_obd": 0}
+        )
+        maintenance.append({
+            "vehicle_id": v.id,
+            "failure_risk": predict_failure_risk(tel)
+        })
 
     ts = int(time.time())
     filename = f"route_{ts}.html"
@@ -1256,14 +1328,18 @@ def optimize():
     map_path = MAP_DIR / filename
     map_rel = f"/mapfile/{filename}"
 
-    PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
+    PALETTE = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+    ]
     veh_ids = [v.id for v in req.vehicles]
     color_by_vehicle = {vid: PALETTE[i % len(PALETTE)] for i, vid in enumerate(veh_ids)}
 
     def _fetch_path(origin_latlon, dest_latlon):
         class P:
             def __init__(self, lat, lon):
-                self.lat = lat; self.lon = lon
+                self.lat = lat
+                self.lon = lon
         o = P(origin_latlon[0], origin_latlon[1])
         d = P(dest_latlon[0], dest_latlon[1])
         return rp.leg_polyline(o, d)
@@ -1289,8 +1365,10 @@ def optimize():
 
             leg_coords: list[list[float]] = []
             try:
-                path = rp.leg_polyline(type("P", (), {"lat": o_lat, "lon": o_lon})(),
-                                       type("P", (), {"lat": d_lat, "lon": d_lon})())
+                path = rp.leg_polyline(
+                    type("P", (), {"lat": o_lat, "lon": o_lon})(),
+                    type("P", (), {"lat": d_lat, "lon": d_lon})()
+                )
                 leg_coords = _coerce_path_to_coords(path) or []
             except Exception:
                 leg_coords = []
@@ -1336,13 +1414,14 @@ def optimize():
 
     return jsonify({
         "status": "ok",
-        "ok": True,  # 👈 compatível com o front antigo
+        "ok": True,  # compatível com o front antigo
         "routes": results,
         "total_time_min": total_time,
         "total_dist_km": total_dist,
         "maintenance": maintenance,
         "map_url": map_rel if map_ok else ""
     })
+
 
 
 # ---------------------------------------------------------------------
@@ -1488,6 +1567,12 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
+
+
+
+
+
+
 
 
 
