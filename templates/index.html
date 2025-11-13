@@ -420,11 +420,12 @@ async function optimize(){
     return;
   }
 
-  const res = await fetch('/optimize', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
+  const res = await fetch('/api/fleet/optimize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
+
   const data = await res.json();
   if(!res.ok){
     q('msg').textContent = (data && data.message) ? data.message : "Erro durante a otimização.";
@@ -652,4 +653,5 @@ document.addEventListener('DOMContentLoaded', loadLastMap);
 
 </body>
 </html>
+
 
