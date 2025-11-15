@@ -310,73 +310,95 @@ def api_get_vehicle(vid):
 # ---------------------------------------------------------------------
 # Update parcial (PUT/PATCH) - resolve o 405 do /vehicles/<vid>
 # ---------------------------------------------------------------------
-@bp_fleet.route("/vehicles/<vid>", methods=["PUT", "PATCH"])
+@bp_fleet.put("/vehicles/<vid>")
+@bp_fleet.patch("/vehicles/<vid>")
 @login_required
 def api_update_vehicle(vid):
-    """
-    Atualiza um veículo do usuário logado.
-    Espera JSON no body com:
-    {
-      "name": "...",
-      "plate": "...",
-      "capacity": 1200,
-      "tracker_imei": "867232050620864"
-    }
-    """
-    data = request.get_json(silent=True) or {}
-
-    name = (data.get("name") or "").strip()
-    plate = (data.get("plate") or "").strip()
-    tracker_imei = (data.get("tracker_imei") or "").strip()
-
-    # ✅ Trata capacity com segurança (evita erro de conversão)
-    raw_capacity = data.get("capacity")
     try:
-        capacity = int(raw_capacity) if raw_capacity not in (None, "", "null") else None
-    except (ValueError, TypeError):
-        capacity = None
+        client_id = _client_id()
+        print(f"[DEBUG] PUT/PATCH /vehicles/{vid} - client_id: {client_id}")
 
-    # ✅ Validações simples (ajusta como quiser)
-    if not name:
-        return jsonify({"error": "O nome do veículo é obrigatório."}), 400
-    if not plate:
-        return jsonify({"error": "A placa é obrigatória."}), 400
+        payload = request.get_json(silent=True) or {}
+        print(f"[DEBUG] payload recebido:", payload)
 
-    conn = get_conn()
-    cur = conn.cursor()
+        # Helpers para converter int sem quebrar
+        def to_int(val):
+            if val in (None, "", "null"):
+                return None
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return None
 
-    try:
-        # Verifica se o veículo existe e pertence ao usuário
-        cur.execute(
-            "SELECT id FROM vehicles WHERE id = ? AND user_id = ?",
-            (vid, current_user.id),
-        )
-        row = cur.fetchone()
-        if not row:
-            return jsonify({"error": "Veículo não encontrado."}), 404
+        name = (payload.get("name") or "").strip()
+        plate = (payload.get("plate") or "").strip()
+        driver = (payload.get("driver") or "").strip()
+        status = (payload.get("status") or "").strip() or "ativo"
 
-        # Atualiza o veículo
-        cur.execute(
-            """
-            UPDATE vehicles
-               SET name = ?,
-                   plate = ?,
-                   capacity = ?,
-                   tracker_imei = ?
-             WHERE id = ?
-               AND user_id = ?
-            """,
-            (name, plate, capacity, tracker_imei or None, vid, current_user.id),
-        )
-        conn.commit()
+        capacity = to_int(payload.get("capacity"))
+        notes = (payload.get("notes") or "").strip()
 
-        return jsonify({"status": "ok"}), 200
+        last_service_km = to_int(payload.get("last_service_km"))
+        next_service_km = to_int(payload.get("next_service_km"))
+        last_service_date = payload.get("last_service_date") or None  # texto ou None
+
+        if not name:
+            return _err("O nome do veículo é obrigatório", 400)
+        if not plate:
+            return _err("A placa do veículo é obrigatória", 400)
+
+        with get_conn() as conn:
+            cur = conn.cursor()
+
+            # ✅ SEM user_id — usa client_id, igual ao GET
+            row = cur.execute(
+                "SELECT id FROM vehicles WHERE client_id = ? AND id = ?",
+                [client_id, vid],
+            ).fetchone()
+
+            if not row:
+                return _err("Veículo não encontrado", 404)
+
+            # ✅ Atualiza apenas a tabela vehicles
+            cur.execute(
+                """
+                UPDATE vehicles
+                   SET name = ?,
+                       plate = ?,
+                       driver = ?,
+                       capacity = ?,
+                       status = ?,
+                       last_service_km = ?,
+                       last_service_date = ?,
+                       next_service_km = ?,
+                       notes = ?
+                 WHERE client_id = ?
+                   AND id = ?
+                """,
+                [
+                    name,
+                    plate,
+                    driver,
+                    capacity,
+                    status,
+                    last_service_km,
+                    last_service_date,
+                    next_service_km,
+                    notes,
+                    client_id,
+                    vid,
+                ],
+            )
+
+        print(f"[DEBUG] Veículo {vid} atualizado com sucesso")
+        return jsonify({"ok": True}), 200
 
     except Exception as e:
-        # ⚠️ LOGA NO CONSOLE PARA VER NO RENDER/LOCAL
-        print("ERRO AO ATUALIZAR VEÍCULO:", e)
-        conn.rollback()
-        return jsonify({"error": "Erro interno ao atualizar veículo."}), 500
+        # ✅ SEM rollback aqui, pq o `with get_conn()` cuida disso
+        print(f"[ERROR] PUT/PATCH /vehicles/{vid}: {e}")
+        print(traceback.format_exc())
+        return _err("Erro interno ao atualizar veículo", 500)
+
 
 
 # ---------------------------------------------------------------------
@@ -448,6 +470,12 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+
+
+
+
+
 
 
 
