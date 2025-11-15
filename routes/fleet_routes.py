@@ -30,6 +30,8 @@ from core.solver.vrptw import solve_vrptw
 
 bp_fleet = Blueprint("fleet", __name__, url_prefix="/api/fleet")
 
+# Guarda o último mapa gerado por cliente na memória do processo
+_last_map_by_client: Dict[int, str] = {}
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -311,94 +313,70 @@ def api_get_vehicle(vid):
 @bp_fleet.route("/vehicles/<vid>", methods=["PUT", "PATCH"])
 @login_required
 def api_update_vehicle(vid):
+    """
+    Atualiza um veículo do usuário logado.
+    Espera JSON no body com:
+    {
+      "name": "...",
+      "plate": "...",
+      "capacity": 1200,
+      "tracker_imei": "867232050620864"
+    }
+    """
+    data = request.get_json(silent=True) or {}
+
+    name = (data.get("name") or "").strip()
+    plate = (data.get("plate") or "").strip()
+    tracker_imei = (data.get("tracker_imei") or "").strip()
+
+    # ✅ Trata capacity com segurança (evita erro de conversão)
+    raw_capacity = data.get("capacity")
     try:
-        client_id = _client_id()
-        data = request.get_json(silent=True) or {}
-        print(f"[DEBUG] {request.method} /vehicles/{vid} - client_id: {client_id}")
-        print(f"[DEBUG] {request.method} /vehicles/{vid} - data: {data}")
+        capacity = int(raw_capacity) if raw_capacity not in (None, "", "null") else None
+    except (ValueError, TypeError):
+        capacity = None
 
-        # 1) Filtra campos do veículo (tabela vehicles)
-        update = _sanitize_vehicle_update(data)
+    # ✅ Validações simples (ajusta como quiser)
+    if not name:
+        return jsonify({"error": "O nome do veículo é obrigatório."}), 400
+    if not plate:
+        return jsonify({"error": "A placa é obrigatória."}), 400
 
-        # 2) Caso especial: permitir bind/alteração do IMEI + vendor via update
-        imei   = (data.get("imei") or "").strip()   if data.get("imei")   else None
-        vendor = (data.get("vendor") or "").strip() if data.get("vendor") else None
+    conn = get_conn()
+    cur = conn.cursor()
 
-        if imei is not None and not _validate_imei(imei):
-            return _err("IMEI inválido (use 15 dígitos).", 400)
+    try:
+        # Verifica se o veículo existe e pertence ao usuário
+        cur.execute(
+            "SELECT id FROM vehicles WHERE id = ? AND user_id = ?",
+            (vid, current_user.id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "Veículo não encontrado."}), 404
 
-        if not update and imei is None and vendor is None:
-            return _err("Nenhum campo válido para atualizar", 400)
+        # Atualiza o veículo
+        cur.execute(
+            """
+            UPDATE vehicles
+               SET name = ?,
+                   plate = ?,
+                   capacity = ?,
+                   tracker_imei = ?
+             WHERE id = ?
+               AND user_id = ?
+            """,
+            (name, plate, capacity, tracker_imei or None, vid, current_user.id),
+        )
+        conn.commit()
 
-        with get_conn() as conn:
-            # 3) Verifica existência do veículo
-            exists = conn.execute(
-                "SELECT 1 FROM vehicles WHERE client_id=? AND id=?",
-                [client_id, vid],
-            ).fetchone() is not None
-            if not exists:
-                return _err("Veículo não encontrado", 404)
-
-            # 4) Atualiza campos do veículo (se houver)
-            if update:
-                sets = ", ".join(f"{k}=?" for k in update.keys())
-                params = list(update.values()) + [client_id, vid]
-                conn.execute(
-                    f"UPDATE vehicles SET {sets} WHERE client_id=? AND id=?",
-                    params,
-                )
-
-            # 5) Vincula / atualiza tracker (garantindo imei/vendor persistidos)
-            if imei is not None:
-                # 5.1) garante relação vehicle<->tracker
-                ok = tracker_bind_vehicle(
-                    client_id=client_id, tracker_id=imei, vehicle_id=vid, force=True
-                )
-                if not ok:
-                    return _err("Falha ao vincular tracker", 400)
-
-                # 5.2) upsert na tabela trackers para preencher imei/vendor
-                # Requer UNIQUE(client_id, tracker_id) na tabela 'trackers'
-                conn.execute(
-                    """
-                    INSERT INTO trackers (client_id, tracker_id, vehicle_id, imei, vendor, updated_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(client_id, tracker_id) DO UPDATE SET
-                        vehicle_id=excluded.vehicle_id,
-                        imei=excluded.imei,
-                        vendor=COALESCE(excluded.vendor, trackers.vendor),
-                        updated_at=CURRENT_TIMESTAMP
-                    """,
-                    [client_id, imei, vid, imei, vendor or None],
-                )
-
-            elif vendor is not None:
-                # Sem IMEI, mas vendor informado: atualiza vendor do tracker já associado ao veículo
-                conn.execute(
-                    """
-                    UPDATE trackers
-                       SET vendor = ?, updated_at = CURRENT_TIMESTAMP
-                     WHERE client_id = ? AND vehicle_id = ?
-                    """,
-                    [vendor, client_id, vid],
-                )
-
-            conn.commit()
-
-        return _ok({
-            "success": True,
-            "id": vid,
-            "updated": {
-                **update,
-                **({"imei": imei} if imei is not None else {}),
-                **({"vendor": vendor} if vendor is not None else {})
-            }
-        })
+        return jsonify({"status": "ok"}), 200
 
     except Exception as e:
-        print(f"[ERROR] {request.method} /vehicles/{vid}: {e}")
-        print(traceback.format_exc())
-        return _err("Erro interno ao atualizar veículo", 500)
+        # ⚠️ LOGA NO CONSOLE PARA VER NO RENDER/LOCAL
+        print("ERRO AO ATUALIZAR VEÍCULO:", e)
+        conn.rollback()
+        return jsonify({"error": "Erro interno ao atualizar veículo."}), 500
 
 
 # ---------------------------------------------------------------------
@@ -470,6 +448,7 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 
 
