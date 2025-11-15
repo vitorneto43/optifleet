@@ -72,6 +72,57 @@
       padding:4px 8px;
       font-size:12px;
     }
+
+    /* ===== Mapa vivo com tela cheia ===== */
+    .live-map-wrapper{
+      position:relative;
+      height:420px;
+      border-radius:12px;
+      overflow:hidden;
+    }
+    .live-map{
+      width:100%;
+      height:100%;
+    }
+    .live-map-expand-btn{
+      font-size:0.85rem;
+      padding:6px 10px;
+      border-radius:999px;
+      border:none;
+      cursor:pointer;
+    }
+    .live-map-wrapper.fullscreen{
+      position:fixed;
+      inset:0;
+      width:100vw;
+      height:100vh;
+      z-index:9999;
+      background:#000;
+      border-radius:0;
+    }
+    .live-map-wrapper.fullscreen .live-map{
+      width:100%;
+      height:100%;
+    }
+    .live-map-close-btn{
+      position:absolute;
+      top:12px;
+      right:16px;
+      z-index:10000;
+      background:rgba(0,0,0,0.7);
+      color:#fff;
+      border:none;
+      border-radius:999px;
+      padding:6px 10px;
+      cursor:pointer;
+      display:none;
+    }
+    .live-map-wrapper.fullscreen .live-map-close-btn{
+      display:inline-flex;
+    }
+    body.no-scroll{
+      overflow:hidden;
+    }
   </style>
 </head>
 <body>
@@ -256,7 +307,7 @@
         <h3 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
           <span>Rastreamento ao vivo</span>
 
-          <!-- Controles do histórico -->
+          <!-- Controles do histórico + botão de expandir -->
           <div class="hist-controls">
             <label class="muted">Histórico</label>
             <select id="histHours">
@@ -270,10 +321,19 @@
             <button class="btn secondary" onclick="exportHistory('csv')">Exportar CSV</button>
             <button class="btn secondary" onclick="exportHistory('pdf')">Exportar PDF</button>
             <button class="btn secondary" onclick="clearHistory()">Limpar</button>
+
+            <!-- botão para abrir o mapa em tela cheia -->
+            <button id="btn-expand-live-map" class="live-map-expand-btn">
+              Expandir mapa
+            </button>
           </div>
         </h3>
 
-        <div id="liveMap" style="height:420px;border-radius:12px;position:relative;"></div>
+        <!-- Wrapper do mapa vivo com suporte a fullscreen -->
+        <div id="liveMapWrapper" class="live-map-wrapper">
+          <div id="liveMap" class="live-map"></div>
+          <button id="btn-close-live-map" class="live-map-close-btn">✕</button>
+        </div>
 
         <!-- Legenda de eventos -->
         <div class="map-legend">
@@ -571,6 +631,47 @@ function initLiveMap() {
   }).addTo(liveMap);
 }
 
+// fullscreen do mapa vivo
+function setupLiveMapFullscreen() {
+  const wrapper = document.getElementById('liveMapWrapper');
+  const btnExpand = document.getElementById('btn-expand-live-map');
+  const btnClose = document.getElementById('btn-close-live-map');
+
+  if (!wrapper || !btnExpand || !btnClose) return;
+
+  function enterFullscreen() {
+    wrapper.classList.add('fullscreen');
+    document.body.classList.add('no-scroll');
+    setTimeout(() => {
+      if (liveMap) liveMap.invalidateSize();
+    }, 300);
+  }
+
+  function exitFullscreen() {
+    wrapper.classList.remove('fullscreen');
+    document.body.classList.remove('no-scroll');
+    setTimeout(() => {
+      if (liveMap) liveMap.invalidateSize();
+    }, 300);
+  }
+
+  btnExpand.addEventListener('click', (e) => {
+    e.stopPropagation();
+    enterFullscreen();
+  });
+
+  btnClose.addEventListener('click', (e) => {
+    e.stopPropagation();
+    exitFullscreen();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && wrapper.classList.contains('fullscreen')) {
+      exitFullscreen();
+    }
+  });
+}
+
 async function loadLatestPositions() {
   const r = await fetch('/api/telemetry/latest');
   if(!r.ok) return;
@@ -732,6 +833,7 @@ async function loadLastMap() {
 
 window.addEventListener('DOMContentLoaded', () => {
   initLiveMap();
+  setupLiveMapFullscreen();
   loadLatestPositions();
   startSSE();
   refreshKpis();
@@ -742,6 +844,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 </body>
 </html>
+
 
 
 
