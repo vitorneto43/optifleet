@@ -111,48 +111,34 @@ PLAN_LIMITS = {
 }
 
 
-def _get_plan_name_for_client(client_id: int) -> str:
+def _get_plan_name_for_client(client_id: int) -> str | None:
     """
-    Descobre o nome do plano do cliente usando assinatura/trial.
-    Ajuste as chaves conforme o que sua tabela realmente retorna.
+    Descobre o nome do plano do cliente:
+    - Se tiver trial ativo, usa o plano do trial
+    - Senão, usa o plano da assinatura ativa
+    Aceita tanto retorno em dict quanto em tupla.
     """
-    plan_name = None
+    trial = get_active_trial(client_id)
+    sub = get_active_subscription(client_id)
 
-    try:
-        sub = get_active_subscription(client_id)
-    except Exception:
-        sub = None
+    def _extract_plan(row):
+        if row is None:
+            return None
 
-    if sub:
-        plan_name = (
-            (sub.get("plan")
-             or sub.get("plan_name")
-             or sub.get("tier")
-             or "")
-            .strip()
-            .lower()
-        )
+        # Caso 1: dict (ex: {"plan": "START"})
+        if isinstance(row, dict):
+            return row.get("plan") or row.get("plan_name")
 
-    # Se não tiver assinatura, tenta trial
-    if not plan_name:
-        try:
-            trial = get_active_trial(client_id)
-        except Exception:
-            trial = None
+        # Caso 2: tupla/lista (ex: ("START",) ou (id, client_id, "START", ...))
+        if isinstance(row, (tuple, list)):
+            # 👉 Se o SELECT for "SELECT plan FROM ...", o plano estará no índice 0
+            # Se o SELECT for mais colunas, ajuste o índice conforme a ordem
+            return row[0]
 
-        if trial:
-            plan_name = (
-                (trial.get("plan")
-                 or trial.get("plan_name")
-                 or "")
-                .strip()
-                .lower()
-            ) or "start"
+        # Caso 3: qualquer outra coisa, ignora
+        return None
 
-    # Fallback padrão
-    if not plan_name:
-        plan_name = "start"
-
+    plan_name = _extract_plan(trial) or _extract_plan(sub)
     return plan_name
 
 
