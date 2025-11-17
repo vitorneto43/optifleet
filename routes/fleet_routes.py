@@ -13,6 +13,9 @@ from core.db import (
     list_vehicles,
     delete_vehicle,
     tracker_bind_vehicle,
+    # ✅ NOVO: vamos usar as assinaturas / trial pra saber o plano
+    get_active_subscription,
+    get_active_trial,
 )
 
 # ==== imports da parte de OTIMIZAÇÃO ====
@@ -99,6 +102,103 @@ def _sanitize_vehicle_update(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------
+# ✅ NOVO: limites de veículos por plano
+# ---------------------------------------------------------------------
+PLAN_LIMITS = {
+    "start": 5,          # Plano Start → até 5 veículos
+    "pro": 50,           # Plano Pro   → até 50 veículos
+    "enterprise": 9_999_999,  # Plano Enterprise → "ilimitado"
+}
+
+
+def _get_plan_name_for_client(client_id: int) -> str:
+    """
+    Descobre o nome do plano do cliente usando assinatura/trial.
+    Ajuste as chaves conforme o que sua tabela realmente retorna.
+    """
+    plan_name = None
+
+    try:
+        sub = get_active_subscription(client_id)
+    except Exception:
+        sub = None
+
+    if sub:
+        plan_name = (
+            (sub.get("plan")
+             or sub.get("plan_name")
+             or sub.get("tier")
+             or "")
+            .strip()
+            .lower()
+        )
+
+    # Se não tiver assinatura, tenta trial
+    if not plan_name:
+        try:
+            trial = get_active_trial(client_id)
+        except Exception:
+            trial = None
+
+        if trial:
+            plan_name = (
+                (trial.get("plan")
+                 or trial.get("plan_name")
+                 or "")
+                .strip()
+                .lower()
+            ) or "start"
+
+    # Fallback padrão
+    if not plan_name:
+        plan_name = "start"
+
+    return plan_name
+
+
+def get_vehicle_limit_for_client(client_id: int) -> int:
+    """
+    Retorna o limite máximo de veículos permitido para esse cliente,
+    com base no plano (Start, Pro, Enterprise).
+    """
+    plan_name = _get_plan_name_for_client(client_id)
+    limit = PLAN_LIMITS.get(plan_name, PLAN_LIMITS["start"])
+    print(f"[DEBUG] Plano do client_id={client_id}: {plan_name} (limite={limit})")
+    return limit
+
+
+def get_vehicles_count_for_client(client_id: int) -> int:
+    """
+    Conta quantos veículos o cliente já possui na tabela vehicles.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM vehicles WHERE client_id = ?",
+            [client_id],
+        ).fetchone()
+        count = int(row[0]) if row and row[0] is not None else 0
+        print(f"[DEBUG] client_id={client_id} já tem {count} veículos")
+        return count
+
+
+def vehicle_exists_for_client(client_id: int, vehicle_id: str) -> bool:
+    """
+    Verifica se um veículo com esse id já existe para o cliente.
+    Isso é importante para não bloquear UPDATE quando o plano está cheio.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM vehicles WHERE client_id = ? AND id = ?",
+            [client_id, vehicle_id],
+        ).fetchone()
+        exists = bool(row)
+        print(
+            f"[DEBUG] vehicle_exists_for_client(client_id={client_id}, id={vehicle_id}) = {exists}"
+        )
+        return exists
+
+
+# ---------------------------------------------------------------------
 # OPTIONS (preflight) - ajuda CORS para /vehicles e /vehicles/<vid>
 # ---------------------------------------------------------------------
 @bp_fleet.route("/vehicles", methods=["OPTIONS"])
@@ -126,27 +226,6 @@ def api_list_vehicles():
         # Converte para o formato esperado pelo frontend
         result = []
         for v in vehicles:
-            # Ordem real (baseada em vehicles.* + trackers.imei, trackers.vendor):
-            # 0: id
-            # 1: client_id        ← ignorado na resposta
-            # 2: name
-            # 3: plate
-            # 4: driver
-            # 5: capacity
-            # 6: tags
-            # 7: obd_id
-            # 8: last_lat
-            # 9: last_lon
-            # 10: last_speed
-            # 11: last_ts
-            # 12: status
-            # 13: last_service_km
-            # 14: last_service_date
-            # 15: next_service_km
-            # 16: notes
-            # 17: imei     (do LEFT JOIN)
-            # 18: vendor   (do LEFT JOIN)
-
             vehicle_data = {
                 "id": v[0],
                 "name": v[2],
@@ -164,7 +243,6 @@ def api_list_vehicles():
                 "notes": v[16],
                 "imei": v[17],
                 "vendor": v[18],
-                # opcional: tracker_id == imei neste modelo, então pode omitir ou manter como v[17]
             }
 
             # Converte datetime para string
@@ -187,6 +265,7 @@ def api_list_vehicles():
 # ---------------------------------------------------------------------
 # Criar/Atualizar (upsert) veículo via POST
 # Mantém seu comportamento: exige id e faz bind do IMEI se enviado.
+# ✅ AGORA COM TRAVA DE LIMITE POR PLANO
 # ---------------------------------------------------------------------
 @bp_fleet.post("/vehicles")
 @login_required
@@ -201,8 +280,32 @@ def api_create_vehicle():
         if not data.get("id"):
             return _err("ID do veículo é obrigatório", 400)
 
+        vehicle_id = str(data["id"]).strip()
+        if not vehicle_id:
+            return _err("ID do veículo é obrigatório", 400)
+
+        # Verifica se é UPDATE (já existe) ou CREATE (novo veículo)
+        is_update = vehicle_exists_for_client(client_id, vehicle_id)
+
+        # Se for veículo NOVO, aplica a trava do plano
+        if not is_update:
+            current_count = get_vehicles_count_for_client(client_id)
+            plan_limit = get_vehicle_limit_for_client(client_id)
+
+            print(
+                f"[DEBUG] Plano permite até {plan_limit} veículos. "
+                f"client_id={client_id} já tem {current_count}."
+            )
+
+            if current_count >= plan_limit:
+                return _err(
+                    f"Você atingiu o limite de {plan_limit} veículos do seu plano. "
+                    "Atualize para um plano superior para cadastrar mais veículos.",
+                    403,
+                )
+
         vehicle_data = {
-            "id": data["id"],
+            "id": vehicle_id,
             "name": data.get("name", ""),
             "plate": data.get("plate", ""),
             "driver": data.get("driver", ""),
@@ -228,7 +331,7 @@ def api_create_vehicle():
             success = tracker_bind_vehicle(
                 client_id=client_id,
                 tracker_id=imei,
-                vehicle_id=data["id"],
+                vehicle_id=vehicle_id,
                 force=True,
             )
             print(f"[DEBUG] POST /vehicles - tracker_bind_vehicle resultado: {success}")
@@ -350,7 +453,6 @@ def api_update_vehicle(vid):
         with get_conn() as conn:
             cur = conn.cursor()
 
-            # ✅ SEM user_id — usa client_id, igual ao GET
             row = cur.execute(
                 "SELECT id FROM vehicles WHERE client_id = ? AND id = ?",
                 [client_id, vid],
@@ -359,7 +461,6 @@ def api_update_vehicle(vid):
             if not row:
                 return _err("Veículo não encontrado", 404)
 
-            # ✅ Atualiza apenas a tabela vehicles
             cur.execute(
                 """
                 UPDATE vehicles
@@ -394,11 +495,9 @@ def api_update_vehicle(vid):
         return jsonify({"ok": True}), 200
 
     except Exception as e:
-        # ✅ SEM rollback aqui, pq o `with get_conn()` cuida disso
         print(f"[ERROR] PUT/PATCH /vehicles/{vid}: {e}")
         print(traceback.format_exc())
         return _err("Erro interno ao atualizar veículo", 500)
-
 
 
 # ---------------------------------------------------------------------
@@ -428,16 +527,6 @@ def api_delete_vehicle(vid):
         print(traceback.format_exc())
         return _err("Erro interno ao remover veículo", 500)
 
-
-# ---------------------------------------------------------------------
-# NOVA ROTA: OTIMIZAÇÃO DE ROTAS
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
-# NOVA ROTA: OTIMIZAÇÃO DE ROTAS
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
-# NOVA ROTA: OTIMIZAÇÃO DE ROTAS (versão robusta)
-# ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
 # Rota de debug para testar
@@ -470,6 +559,8 @@ def health_check():
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+
 
 
 
