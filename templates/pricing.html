@@ -25,7 +25,7 @@
 <div class="wrap">
   <h1>Planos</h1>
   <p class="muted">
-    Mensal fixo (R$ 399, R$ 1.499 e R$ 2.200).
+    Mensal fixo (R$ 399, R$ 1.499 e R$ 2.200). Pagamento por <strong>Pix, cartão ou boleto</strong>.
   </p>
 
   <div class="grid">
@@ -45,7 +45,7 @@
 
       <div class="row">
         <a class="btn" href="javascript:void(0)" onclick="go('start')">Contratar</a>
-        <span class="muted">Pagamento por boleto</span>
+        <span class="muted">Pague com Pix, cartão ou boleto</span>
       </div>
     </div>
 
@@ -57,7 +57,7 @@
       <div class="switch">
         <label for="v-pro">Veículos</label>
         <!-- pro SEMPRE 1..50 -->
-        <input id="v-pro" type="number" min="1" max="50" value="20" style="width:90px">
+        <input id="v-pro" type="number" min="6" max="50" value="20" style="width:90px">
         <select id="b-pro">
           <option value="monthly" selected>Mensal</option>
         </select>
@@ -65,11 +65,10 @@
 
       <div class="row">
         <a class="btn" href="javascript:void(0)" onclick="go('pro')">Contratar</a>
-        <span class="muted">Pagamento por boleto</span>
+        <span class="muted">Pague com Pix, cartão ou boleto</span>
       </div>
     </div>
 
-    <!-- ENTERPRISE -->
     <!-- ENTERPRISE -->
     <div class="card">
       <h3>Enterprise <span class="badge">51+ veículos</span></h3>
@@ -92,7 +91,7 @@
 
       <div class="row">
         <a class="btn" href="javascript:void(0)" onclick="go('enterprise')">Assinar Enterprise</a>
-        <span class="muted">Pagamento por boleto</span>
+        <span class="muted">Pague com Pix, cartão ou boleto</span>
       </div>
     </div>
 
@@ -119,12 +118,12 @@ function go(plan, billingOverride) {
     if (isNaN(vehicles) || vehicles < 1) vehicles = 1;
     if (vehicles > 5) vehicles = 5;
   } else if (plan === 'pro') {
-    if (isNaN(vehicles) || vehicles < 1) vehicles = 1;
+    if (isNaN(vehicles) || vehicles < 6) vehicles = 6;
     if (vehicles > 50) vehicles = 50;
   } else if (plan === 'enterprise') {
-    // AQUI é o que você pediu: deixa passar o que o cliente digitou
+    // deixa passar o que o cliente digitou, mínimo 51
     if (isNaN(vehicles) || vehicles < 51) vehicles = 51;
-    // NÃO tem limite máximo
+    // sem limite máximo
   }
 
   // por enquanto só mensal

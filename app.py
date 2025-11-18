@@ -1,4 +1,6 @@
 # app.py
+from dotenv import load_dotenv
+load_dotenv()  # 👈 TEM QUE SER A PRIMEIRA COISA
 from pathlib import Path
 import os
 import time
@@ -8,7 +10,6 @@ import json
 import csv
 from io import StringIO, BytesIO
 
-from dotenv import load_dotenv
 from flask import (
     Flask, request, jsonify, render_template,
     redirect, url_for, flash, send_file, abort
@@ -35,14 +36,14 @@ from routes.reroute_routes import bp_reroute
 from routes.notify_routes import bp_notify
 from routes.vendor_ingest_routes import bp_vendor
 from routes.billing_routes import bp_billing
-from billing.asaas_routes import bp_asaas
-from billing.asaas_webhook import bp_asaas_webhook
 from routes.trial_routes import bp_trial
 from routes.contact_routes import bp_contact
 from routes.checkout_routes import bp_checkout
 from routes.demo_routes import bp_demo
 from routes.account_routes import bp_account
 from routes.admin_routes import admin_bp
+from routes.payments_routes import bp_payments
+
 
 # ===== Solver / Providers / Maintenance =====
 from core.models import Location, TimeWindow, Depot, Vehicle, Stop, OptimizeRequest, hhmm_to_minutes
@@ -1118,26 +1119,33 @@ def parse_request(payload) -> OptimizeRequest:
 @app.post("/optimize")
 @login_required
 def optimize():
-    raw = request.get_json(force=True)
+    raw = request.get_json(force=True) or {}
 
     # ==========================
-    # 🔥 NOVO: ler max_days do depot
+    # 1) Lê max_days do payload
     # ==========================
-    dep_raw = (raw.get("depot") or {})
+    depot_raw = raw.get("depot") or {}
     try:
-        max_days = int(dep_raw.get("max_days") or 1)
+        max_days = int(depot_raw.get("max_days") or 1)
     except (TypeError, ValueError):
         max_days = 1
     if max_days < 1:
         max_days = 1
-    extra_minutes = (max_days - 1) * 24 * 60  # ex.: 3 dias => +2880 min
-    # ==========================
 
+    # quantos minutos extras além do primeiro dia
+    extra_minutes = (max_days - 1) * 24 * 60
+
+    # ==========================
+    # 2) Parse da requisição
+    # ==========================
     try:
         req = parse_request(raw)
     except Exception as e:
         return jsonify({"status": "bad_request", "message": str(e)}), 400
 
+    # ==========================
+    # 3) Matriz de tempos/distâncias
+    # ==========================
     all_points = [req.depot] + req.stops
     try:
         m = rp.travel_matrix(all_points)
@@ -1153,9 +1161,12 @@ def optimize():
             time_m_all[i][j] = cell["minutes"]
             dist_m_all[i][j] = cell["km"]
 
+    # ==========================
+    # 4) Mapeia stops → veículos (se tiver assignment)
+    # ==========================
     raw_stops = raw.get("stops", [])
     id_to_vehicle = {rs.get("id"): rs.get("vehicle") for rs in raw_stops if rs.get("id")}
-    stops_by_vehicle = {}
+    stops_by_vehicle: dict[str, list[Stop]] = {}
     has_assignment = False
     for s in req.stops:
         vcode = id_to_vehicle.get(s.id)
@@ -1167,11 +1178,23 @@ def optimize():
     results = []
     total_time = 0.0
     total_dist = 0.0
-    veh_by_id = {v.id: v for v in req.vehicles}
 
-    # =====================================================
-    # FUNÇÃO AUXILIAR: já usando extra_minutes (multi-day)
-    # =====================================================
+    # ==========================
+    # 5) Estende janelas dos veículos com base em max_days
+    # ==========================
+    veh_by_id = {v.id: v for v in req.vehicles}
+    extended_veh = {}
+    for v in req.vehicles:
+        extended_veh[v.id] = {
+            "id": v.id,
+            "capacity": v.capacity,
+            "start_min": v.start_min,
+            "end_min": v.end_min + extra_minutes,  # 👈 estica em N dias
+        }
+
+    # ==========================
+    # 6) Função helper: recorta matriz e chama solver
+    # ==========================
     def slice_and_solve(stops_subset, vehicles_subset):
         points = [req.depot] + stops_subset
         idx_map = [0] + [1 + req.stops.index(s) for s in stops_subset]
@@ -1188,30 +1211,18 @@ def optimize():
         service_times = [0] + [s.service_min for s in stops_subset]
         demands = [0] + [s.demand for s in stops_subset]
 
-        # 🔥 NOVO: estende a janela do depósito e dos clientes em extra_minutes
-        dep_w = req.depot.window
-        dep_start = dep_w.start_min
-        dep_end = dep_w.end_min + extra_minutes
-
+        # 🔥 AQUI: janela do depósito e paradas esticadas para max_days
+        dep_start = req.depot.window.start_min
+        dep_end = req.depot.window.end_min + extra_minutes
         time_windows = [(dep_start, dep_end)]
         for s in stops_subset:
             if s.window:
-                tw_start = s.window.start_min
-                tw_end = s.window.end_min + extra_minutes
+                start = s.window.start_min
+                end = s.window.end_min + extra_minutes
             else:
-                tw_start = dep_start
-                tw_end = dep_end
-            time_windows.append((tw_start, tw_end))
-
-        # 🔥 NOVO: ajustar janela dos veículos também
-        vehicles_adj = []
-        for v in vehicles_subset:
-            vehicles_adj.append({
-                "id": v["id"],
-                "capacity": v["capacity"],
-                "start_min": v["start_min"],
-                "end_min": v["end_min"] + extra_minutes,
-            })
+                start = dep_start
+                end = dep_end
+            time_windows.append((start, end))
 
         return solve_vrptw(
             time_matrix_min=tmat,
@@ -1220,11 +1231,13 @@ def optimize():
             service_times=service_times,
             demands=demands,
             time_windows=time_windows,
-            vehicles=vehicles_adj,
-            objective=req.objective
+            vehicles=vehicles_subset,
+            objective=req.objective,
         )
-    # =====================================================
 
+    # ==========================
+    # 7) Se não tiver vehicle fixo, distribui round-robin
+    # ==========================
     def rr_partition(stops, vid_list):
         buckets = {vid: [] for vid in vid_list}
         if not stops:
@@ -1237,20 +1250,19 @@ def optimize():
     if FORCE_PER_VEHICLE:
         if not has_assignment:
             veh_ids = [v.id for v in req.vehicles]
-            stops_by_vehicle = rr_partition(req.stops, veh_ids)
+            stops_by_vehicle_local = rr_partition(req.stops, veh_ids)
+        else:
+            stops_by_vehicle_local = stops_by_vehicle
 
         for vid, v in veh_by_id.items():
-            subset = stops_by_vehicle.get(vid, [])
+            subset = stops_by_vehicle_local.get(vid, [])
             if subset:
-                veh_def = [{
-                    "id": v.id,
-                    "capacity": v.capacity,
-                    "start_min": v.start_min,
-                    "end_min": v.end_min,
-                }]
+                veh_def = [extended_veh[v.id]]  # 👈 usa veículo estendido
                 r = slice_and_solve(subset, veh_def)
                 if r.get("status") != "ok":
+                    # aqui vem o "infeasible" que você viu
                     return jsonify(r), 400
+
                 for route in r["routes"]:
                     route["vehicle_id"] = v.id
                     abs_nodes = []
@@ -1262,6 +1274,7 @@ def optimize():
                     total_time += route["time_min"]
                     total_dist += route["dist_km"]
             else:
+                # veículo sem paradas
                 results.append({
                     "vehicle_id": v.id,
                     "nodes": [0, 0],
@@ -1274,16 +1287,8 @@ def optimize():
             for vcode, subset in stops_by_vehicle.items():
                 v = veh_by_id.get(vcode)
                 if not v:
-                    return jsonify({
-                        "status": "bad_request",
-                        "message": f"Veículo '{vcode}' não existe."
-                    }), 400
-                veh_def = [{
-                    "id": v.id,
-                    "capacity": v.capacity,
-                    "start_min": v.start_min,
-                    "end_min": v.end_min,
-                }]
+                    return jsonify({"status": "bad_request", "message": f"Veículo '{vcode}' não existe."}), 400
+                veh_def = [extended_veh[v.id]]
                 r = slice_and_solve(subset, veh_def)
                 if r.get("status") != "ok":
                     return jsonify(r), 400
@@ -1293,12 +1298,7 @@ def optimize():
                     total_time += route["time_min"]
                     total_dist += route["dist_km"]
         else:
-            vehs = [{
-                "id": v.id,
-                "capacity": v.capacity,
-                "start_min": v.start_min,
-                "end_min": v.end_min,
-            } for v in req.vehicles]
+            vehs = list(extended_veh.values())
             r = slice_and_solve(req.stops, vehs)
             if r.get("status") != "ok":
                 return jsonify(r), 400
@@ -1309,18 +1309,24 @@ def optimize():
             total_time = r["total_time_min"]
             total_dist = r["total_dist_km"]
 
+    # ==========================
+    # 8) Manutenção (igual antes)
+    # ==========================
     telemetry_all = raw.get("telemetry", {})
     maintenance = []
     for v in req.vehicles:
         tel = telemetry_all.get(
             v.id,
-            {"km_rodados": 20000, "dias_desde_ultima_manutencao": 60, "alertas_obd": 0}
+            {"km_rodados": 20000, "dias_desde_ultima_manutencao": 60, "alertas_obd": 0},
         )
         maintenance.append({
             "vehicle_id": v.id,
-            "failure_risk": predict_failure_risk(tel)
+            "failure_risk": predict_failure_risk(tel),
         })
 
+    # ==========================
+    # 9) Gera mapa HTML (igual antes)
+    # ==========================
     ts = int(time.time())
     filename = f"route_{ts}.html"
 
@@ -1363,11 +1369,10 @@ def optimize():
             o_lat, o_lon = _ll(all_pts[a])
             d_lat, d_lon = _ll(all_pts[b])
 
-            leg_coords: list[list[float]] = []
             try:
                 path = rp.leg_polyline(
                     type("P", (), {"lat": o_lat, "lon": o_lon})(),
-                    type("P", (), {"lat": d_lat, "lon": d_lon})()
+                    type("P", (), {"lat": d_lat, "lon": d_lon})(),
                 )
                 leg_coords = _coerce_path_to_coords(path) or []
             except Exception:
@@ -1392,34 +1397,40 @@ def optimize():
             str(map_path),
             fetch_path=_fetch_path,
             color_by_vehicle=color_by_vehicle,
-            legend_title="Rotas por veículo"
+            legend_title="Rotas por veículo",
         )
     except Exception as e:
         print("[MAP] Falha ao gerar mapa:", e)
         map_ok = False
 
+    # ==========================
+    # 10) Salva last_plans
+    # ==========================
     uid = int(current_user.id)
     with get_conn() as con:
         con.execute("DELETE FROM last_plans WHERE user_id = ?", [uid])
-        con.execute("""
+        con.execute(
+            """
             INSERT INTO last_plans (user_id, created_at, req_json, routes_json, map_url, path_json)
             VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
-        """, [
-            uid,
-            json.dumps(raw),
-            json.dumps(results),
-            map_rel if map_ok else "",
-            json.dumps(vehicle_paths)
-        ])
+            """,
+            [
+                uid,
+                json.dumps(raw),
+                json.dumps(results),
+                map_rel if map_ok else "",
+                json.dumps(vehicle_paths),
+            ],
+        )
 
     return jsonify({
         "status": "ok",
-        "ok": True,  # compatível com o front antigo
+        "ok": True,
         "routes": results,
         "total_time_min": total_time,
         "total_dist_km": total_dist,
         "maintenance": maintenance,
-        "map_url": map_rel if map_ok else ""
+        "map_url": map_rel if map_ok else "",
     })
 
 
@@ -1429,7 +1440,12 @@ def optimize():
 # ---------------------------------------------------------------------
 
 
-@bp_fleet.post("/api/optimize")
+# ---------------------------------------------------------------------
+# Último mapa otimizado por cliente (usado no dashboard)
+# ---------------------------------------------------------------------
+
+
+@app.post("/api/optimize")
 @login_required
 def api_optimize():
     """
@@ -1438,6 +1454,7 @@ def api_optimize():
     e recebe exatamente a mesma resposta que em POST /optimize.
     """
     return optimize()
+
 
 
 
@@ -1542,13 +1559,13 @@ app.register_blueprint(bp_reroute)
 app.register_blueprint(bp_notify)
 app.register_blueprint(bp_vendor)
 app.register_blueprint(bp_billing)
-app.register_blueprint(bp_asaas)
-app.register_blueprint(bp_asaas_webhook)
 app.register_blueprint(bp_trial)
 app.register_blueprint(bp_contact)
 app.register_blueprint(bp_checkout)
 app.register_blueprint(bp_demo)
 app.register_blueprint(bp_account)
+app.register_blueprint(bp_payments)
+
 
 # -----------------------------------------------------------------------------
 # Run (dev)
@@ -1567,25 +1584,6 @@ if __name__ == "__main__":
 
     print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
     app.run(host=host, port=port, debug=False)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

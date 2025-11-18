@@ -151,4 +151,3 @@ def _coerce_point(raw: dict, role: str):
 
     lat, lon = geocode_address(address)
     return lat, lon, address
-

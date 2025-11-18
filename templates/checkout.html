@@ -35,7 +35,6 @@
         {% endif %}
       </p>
 
-      <!-- AQUI MOSTRA EXATAMENTE O NÚMERO QUE VEIO -->
       <p>
         <b>Veículos:</b>
         {% if vehicles == 1 %}
@@ -55,13 +54,13 @@
         {% endif %}
       </p>
 
-      <p class="muted">O pagamento será processado pelo Asaas em ambiente seguro.</p>
+      <p class="muted">O pagamento será processado pelo PagSeguro em ambiente seguro.</p>
     </div>
 
     <!-- FORM -->
     <div class="box">
       <h2 style="margin:0 0 14px 0;font-size:20px">Dados do pagador</h2>
-      <form method="post" action="{{ url_for('asaas.start_subscription_form') }}">
+      <form method="post" action="{{ url_for('billing.go_checkout') }}">
         <!-- Esses 3 campos escondidos levam exatamente o que o servidor já calculou -->
         <input type="hidden" name="plan" value="{{ plan }}">
         <input type="hidden" name="billing" value="{{ billing }}">
@@ -90,7 +89,7 @@
         </div>
 
         <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
-          <button class="btn" type="submit">Prosseguir para pagamento (Asaas)</button>
+          <button class="btn" type="submit">Prosseguir para pagamento (PagSeguro)</button>
           <a href="{{ url_for('billing.pricing_page') }}" class="btn btn-secondary">← Voltar e ver preços</a>
         </div>
       </form>
