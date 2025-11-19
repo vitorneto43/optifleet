@@ -10,9 +10,6 @@ from billing.pagseguro_client import (
     criar_pedido_boleto_optifleet,
 )
 
-# Se você já tiver essa função em outro módulo, importe daqui:
-# from core.db import ativar_plano_usuario
-
 bp_payments = Blueprint("payments", __name__, url_prefix="/api/payments")
 
 # Valores em CENTAVOS
@@ -38,9 +35,13 @@ def _tax_id_from_user() -> str:
 # =======================  PIX  ========================
 # ======================================================
 
-@bp_payments.post("/checkout/pix")
+@bp_payments.route("/checkout/pix", methods=["POST"])
 @login_required
 def checkout_pix():
+    """
+    Cria um pedido PIX no PagSeguro.
+    Ex: POST /api/payments/checkout/pix { "plano": "start" }
+    """
     data = request.get_json() or {}
     plano = data.get("plano", "start")
     total = _preco_plano(plano)
@@ -78,9 +79,20 @@ def checkout_pix():
 # ====================  CARTÃO  =======================
 # ======================================================
 
-@bp_payments.post("/checkout/card")
+@bp_payments.route("/checkout/card", methods=["POST"])
 @login_required
 def checkout_card():
+    """
+    Cria um pedido via cartão de crédito no PagSeguro.
+    Ex: POST /api/payments/checkout/card
+    Body:
+    {
+      "plano": "pro",
+      "encrypted_card": "...",
+      "security_code": "123",
+      "installments": 1
+    }
+    """
     data = request.get_json() or {}
     plano = data.get("plano", "start")
     total = _preco_plano(plano)
@@ -125,9 +137,13 @@ def checkout_card():
 # ====================  BOLETO  =======================
 # ======================================================
 
-@bp_payments.post("/checkout/boleto")
+@bp_payments.route("/checkout/boleto", methods=["POST"])
 @login_required
 def checkout_boleto():
+    """
+    Cria um pedido via Boleto no PagSeguro.
+    Ex: POST /api/payments/checkout/boleto { "plano": "enterprise" }
+    """
     data = request.get_json() or {}
     plano = data.get("plano", "start")
     total = _preco_plano(plano)
@@ -170,8 +186,7 @@ def checkout_boleto():
 def pagseguro_webhook():
     """
     Webhook chamado pelo PagSeguro quando o status da cobrança mudar.
-    Exemplo de URL final: https://www.optifleet.com.br/api/payments/webhook
-    (é essa URL que você configura lá no painel do PagSeguro).
+    URL no PagSeguro: https://www.optifleet.com.br/api/payments/webhook
     """
     event = request.get_json() or {}
 
@@ -183,8 +198,10 @@ def pagseguro_webhook():
     # print("Webhook PagSeguro:", charge_id, status, flush=True)
 
     if status == "PAID":
-        # ativa o plano no banco (implemente essa função)
+        # TODO: chamar função que ativa plano no banco:
         # ativar_plano_usuario(event)
         pass
 
     return jsonify({"success": True}), 200
+
+
