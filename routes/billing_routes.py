@@ -7,16 +7,14 @@ from flask import (
     url_for,
     flash,
     current_app,
+    jsonify,
 )
 from flask_login import login_required, current_user
 
-# 👉 Ajuste o import conforme onde está seu cliente PagSeguro
-# se estiver em core.billing.pagseguro_client, troque a linha abaixo:
 from billing.pagseguro_client import criar_pedido_pix_optifleet
 import re
 
 bp_billing = Blueprint("billing", __name__, url_prefix="/billing")
-
 
 
 def _fmt_brl(v: float) -> str:
@@ -46,6 +44,7 @@ def _price(plan: str, billing: str, vehicles: int) -> float:
         return round(base * 12 * (1 - annual_discount), 2)
     else:
         return base
+
 
 def _tax_id_from_form_or_user(source) -> str:
     """
@@ -144,7 +143,7 @@ def go_checkout():
     reference_id = f"OPT-{current_user.id}-{plan}-{billing}"
 
     try:
-        # Usa o MESMO helper que você já está usando em /api/payments/checkout/pix
+        # Usa o helper de PIX (PagSeguro /orders com qr_codes)
         order = criar_pedido_pix_optifleet(reference_id, total_centavos, customer)
         current_app.logger.info("Resposta PagSeguro (PIX via billing/go): %r", order)
     except Exception:
@@ -178,10 +177,7 @@ def go_checkout():
         flash("Não foi possível obter a imagem do QR Code PIX.", "danger")
         return redirect(url_for("billing.checkout", plan=plan, billing=billing, vehicles=vehicles))
 
-    # 👉 Aqui, pra ficar simples e rodando AGORA, vou te redirecionar direto pro PNG do QR.
-    # O cliente vai ver a imagem do QR e pode escanear pelo app do banco.
-    # Depois, se você quiser, criamos uma página bonita 'pix_checkout.html' mostrando
-    # o QR na tela com botão de copiar código.
+    # Redireciona direto para a imagem do QR Code
     return redirect(qr_png)
 
 
@@ -209,6 +205,42 @@ def pricing_page():
         },
     }
     return render_template("pricing.html", annual_discount=annual_discount, plans=plans, fmt=_fmt_brl)
+
+
+# ======================================================
+# =========  ROTA DE TESTE PARA HOMOLOGAÇÃO PIX  =======
+# ======================================================
+
+@bp_billing.get("/test/pix")
+def test_pix_pagseguro():
+    """
+    Rota de teste só para homologação PagBank.
+    Não exige login. Dispara um pedido PIX de teste e
+    devolve o JSON retornado pelo PagSeguro.
+
+    Os logs completos (REQUEST/RESPONSE) saem no terminal,
+    vindos de billing/pagseguro_client.py.
+    """
+    price = 399.00
+    total_centavos = int(price * 100)
+
+    # Dados de teste fixos
+    customer = {
+        "name": "Cliente Teste OptiFleet",
+        "email": "cliente.teste@optifleet.com.br",
+        "tax_id": "12345678909",  # CPF fictício só para teste
+    }
+
+    reference_id = "OPT-HOMOLOG-PIX-TEST-001"
+
+    try:
+        order = criar_pedido_pix_optifleet(reference_id, total_centavos, customer)
+        current_app.logger.info("Resposta PagSeguro (PIX via /billing/test/pix): %r", order)
+        return jsonify(order), 200
+    except Exception as e:
+        current_app.logger.exception("Erro ao criar pedido PIX no PagSeguro em /billing/test/pix")
+        return jsonify({"error": str(e)}), 500
+
 
 
 
