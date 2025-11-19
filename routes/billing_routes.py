@@ -12,10 +12,11 @@ from flask_login import login_required, current_user
 
 # 👉 Ajuste o import conforme onde está seu cliente PagSeguro
 # se estiver em core.billing.pagseguro_client, troque a linha abaixo:
-from billing.pagseguro_client import PagSeguroClient
+from billing.pagseguro_client import criar_pedido_pix_optifleet
+import re
 
 bp_billing = Blueprint("billing", __name__, url_prefix="/billing")
-pagseguro = PagSeguroClient()
+
 
 
 def _fmt_brl(v: float) -> str:
@@ -45,6 +46,18 @@ def _price(plan: str, billing: str, vehicles: int) -> float:
         return round(base * 12 * (1 - annual_discount), 2)
     else:
         return base
+
+def _tax_id_from_form_or_user(source) -> str:
+    """
+    Pega CPF/CNPJ do form (cpfCnpj) ou do usuário logado,
+    e deixa só números.
+    """
+    cpf_cnpj = (
+        (source.get("cpfCnpj") if hasattr(source, "get") else None)
+        or getattr(current_user, "cpf_cnpj", "")
+        or ""
+    )
+    return re.sub(r"\D", "", cpf_cnpj)
 
 
 @bp_billing.get("/checkout")
@@ -94,19 +107,22 @@ def checkout():
     )
 
 
-@bp_billing.get("/go")
+@bp_billing.route("/go", methods=["GET", "POST"])
 @login_required
 def go_checkout():
     """
-    Chamada pela tela de pricing:
-    /billing/go?plan=start&billing=monthly&vehicles=5
+    - GET: chamado pela tela de pricing via querystring
+      /billing/go?plan=start&billing=monthly&vehicles=5
 
-    Aqui criamos a cobrança no PagSeguro e redirecionamos
-    o usuário diretamente para o link de pagamento.
+    - POST: chamado pelo <form method="post" action="{{ url_for('billing.go_checkout') }}">
+      presente em checkout.html
     """
-    plan = (request.args.get("plan") or "pro").lower()
-    billing = (request.args.get("billing") or "monthly").lower()
-    vehicles_str = request.args.get("vehicles") or "1"
+    # Usa form se for POST, senão usa querystring
+    source = request.form if request.method == "POST" else request.args
+
+    plan = (source.get("plan") or "pro").lower()
+    billing = (source.get("billing") or "monthly").lower()
+    vehicles_str = source.get("vehicles") or "1"
 
     try:
         vehicles = int(vehicles_str)
@@ -114,52 +130,59 @@ def go_checkout():
         vehicles = 1
 
     price = _price(plan, billing, vehicles)
+    total_centavos = int(price * 100)
 
-    # Monta payload para PagSeguro
-    # ⚠ Se no seu PagSeguro for `create_checkout`, troque o nome do método mais embaixo
-    payload = {
-        "reference_id": f"OPT-{current_user.id}-{plan}-{billing}",
-        "description": f"Plano {plan.upper()} ({billing}) - OptiFleet",
-        "amount": {
-            "value": int(price * 100),  # em centavos
-            "currency": "BRL",
-        },
-        "payment_method": {
-            "type": "PIX",  # depois você pode mudar para CREDIT_CARD se quiser
-        },
-        "notification_urls": [
-            "https://www.optifleet.com.br/api/payments/pagseguro/webhook"
-        ],
-        "customer": {
-            "name": getattr(current_user, "name", "") or "Cliente OptiFleet",
-            "email": getattr(current_user, "email", "") or "contato@optifleet.com.br",
-        },
+    # Monta os dados do cliente pro helper de PIX
+    tax_id = _tax_id_from_form_or_user(source)
+
+    customer = {
+        "name": getattr(current_user, "name", "") or source.get("name") or "Cliente OptiFleet",
+        "email": getattr(current_user, "email", "") or source.get("email") or "contato@optifleet.com.br",
+        "tax_id": tax_id,
     }
 
+    reference_id = f"OPT-{current_user.id}-{plan}-{billing}"
+
     try:
-        # 👉 Se no seu cliente o método for create_checkout, troque aqui:
-        res = pagseguro.create_charge(payload)
-        current_app.logger.info("Resposta PagSeguro (billing/go): %r", res)
+        # Usa o MESMO helper que você já está usando em /api/payments/checkout/pix
+        order = criar_pedido_pix_optifleet(reference_id, total_centavos, customer)
+        current_app.logger.info("Resposta PagSeguro (PIX via billing/go): %r", order)
     except Exception:
-        current_app.logger.exception("Erro ao criar cobrança no PagSeguro em /billing/go")
-        flash("Ocorreu um erro ao iniciar o pagamento. Tente novamente em instantes.", "danger")
+        current_app.logger.exception("Erro ao criar pedido PIX no PagSeguro em /billing/go")
+        flash("Ocorreu um erro ao iniciar o pagamento PIX. Tente novamente em instantes.", "danger")
         return redirect(url_for("billing.checkout", plan=plan, billing=billing, vehicles=vehicles))
 
-    pay_url = None
-    for link in res.get("links", []):
-        if link.get("rel") in ("PAY", "PAYMENT_LINK"):
-            pay_url = link.get("href")
+    # Pega o primeiro QR code retornado
+    qr_codes = order.get("qr_codes") or []
+    if not qr_codes:
+        current_app.logger.error("Nenhum qr_codes retornado pelo PagSeguro em /billing/go: %r", order)
+        flash("Não foi possível gerar o QR Code do PIX. Tente novamente mais tarde.", "danger")
+        return redirect(url_for("billing.checkout", plan=plan, billing=billing, vehicles=vehicles))
+
+    qr = qr_codes[0]
+    links = qr.get("links") or []
+
+    # NORMALMENTE o PagBank manda um link de imagem PNG do QR Code
+    qr_png = None
+    for link in links:
+        if link.get("media") in ("image/png", "image/jpeg", "image/jpg"):
+            qr_png = link.get("href")
             break
 
-    if not pay_url:
-        current_app.logger.error(
-            "Nenhum link de pagamento encontrado na resposta do PagSeguro: %r", res
-        )
-        flash("Não foi possível obter o link de pagamento. Tente novamente mais tarde.", "danger")
+    # Fallback: se não achar, pega o primeiro link mesmo
+    if not qr_png and links:
+        qr_png = links[0].get("href")
+
+    if not qr_png:
+        current_app.logger.error("Nenhum link para QR Code encontrado em /billing/go: %r", order)
+        flash("Não foi possível obter a imagem do QR Code PIX.", "danger")
         return redirect(url_for("billing.checkout", plan=plan, billing=billing, vehicles=vehicles))
 
-    # Redireciona o usuário para o PagSeguro
-    return redirect(pay_url)
+    # 👉 Aqui, pra ficar simples e rodando AGORA, vou te redirecionar direto pro PNG do QR.
+    # O cliente vai ver a imagem do QR e pode escanear pelo app do banco.
+    # Depois, se você quiser, criamos uma página bonita 'pix_checkout.html' mostrando
+    # o QR na tela com botão de copiar código.
+    return redirect(qr_png)
 
 
 @bp_billing.get("/pricing")
@@ -186,6 +209,9 @@ def pricing_page():
         },
     }
     return render_template("pricing.html", annual_discount=annual_discount, plans=plans, fmt=_fmt_brl)
+
+
+
 
 
 
