@@ -66,7 +66,20 @@ def criar_pedido_pix_optifleet(reference_id: str, total_centavos: int, customer:
         "notification_urls": [PAGSEGURO_NOTIFICATION_URL],
     }
 
-    resp = requests.post(url, headers=_headers(), json=body, timeout=30)
+    headers = _headers()
+    resp = requests.post(url, headers=headers, json=body, timeout=30)
+
+    # ===== LOG PARA HOMOLOGAÇÃO =====
+    print("\n===== PAGSEGURO PIX - REQUEST =====")
+    print("URL:", url)
+    print("HEADERS:", headers)
+    print("BODY:", body)
+    print("===== PAGSEGURO PIX - RESPONSE =====")
+    print("STATUS:", resp.status_code)
+    print("BODY:", resp.text)
+    print("====================================\n")
+    # ================================
+
     resp.raise_for_status()
     return resp.json()
 
@@ -125,7 +138,20 @@ def criar_pedido_cartao_optifleet(
         "notification_urls": [PAGSEGURO_NOTIFICATION_URL],
     }
 
-    resp = requests.post(url, headers=_headers(), json=body, timeout=30)
+    headers = _headers()
+    resp = requests.post(url, headers=headers, json=body, timeout=30)
+
+    # ===== LOG PARA HOMOLOGAÇÃO =====
+    print("\n===== PAGSEGURO CARTAO - REQUEST =====")
+    print("URL:", url)
+    print("HEADERS:", headers)
+    print("BODY:", body)
+    print("===== PAGSEGURO CARTAO - RESPONSE =====")
+    print("STATUS:", resp.status_code)
+    print("BODY:", resp.text)
+    print("=======================================\n")
+    # =====================================
+
     resp.raise_for_status()
     return resp.json()
 
@@ -190,7 +216,20 @@ def criar_pedido_boleto_optifleet(
         "notification_urls": [PAGSEGURO_NOTIFICATION_URL],
     }
 
-    resp = requests.post(url, headers=_headers(), json=body, timeout=30)
+    headers = _headers()
+    resp = requests.post(url, headers=headers, json=body, timeout=30)
+
+    # ===== LOG PARA HOMOLOGAÇÃO =====
+    print("\n===== PAGSEGURO BOLETO - REQUEST =====")
+    print("URL:", url)
+    print("HEADERS:", headers)
+    print("BODY:", body)
+    print("===== PAGSEGURO BOLETO - RESPONSE =====")
+    print("STATUS:", resp.status_code)
+    print("BODY:", resp.text)
+    print("=======================================\n")
+    # =====================================
+
     resp.raise_for_status()
     return resp.json()
 
@@ -229,12 +268,39 @@ class PagSeguroClient:
             payload["notification_urls"] = [self.notification_url]
 
         url = f"{self.base_url}/charges"
-        resp = requests.post(url, headers=self._headers(), json=payload, timeout=30)
+        headers = self._headers()
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+
+        # ===== LOG PARA HOMOLOGAÇÃO =====
+        print("\n===== PAGSEGURO CHARGE - REQUEST =====")
+        print("URL:", url)
+        print("HEADERS:", headers)
+        print("BODY:", payload)
+        print("===== PAGSEGURO CHARGE - RESPONSE =====")
+        print("STATUS:", resp.status_code)
+        print("BODY:", resp.text)
+        print("=======================================\n")
+        # =====================================
+
         resp.raise_for_status()
         return resp.json()
 
     def get_charge(self, charge_id: str) -> dict:
         url = f"{self.base_url}/charges/{charge_id}"
-        resp = requests.get(url, headers=self._headers(), timeout=30)
+        headers = self._headers()
+        resp = requests.get(url, headers=headers, timeout=30)
+
+        # (opcional, mas pode ajudar na homologação)
+        print("\n===== PAGSEGURO GET CHARGE - REQUEST =====")
+        print("URL:", url)
+        print("HEADERS:", headers)
+        print("===== PAGSEGURO GET CHARGE - RESPONSE =====")
+        print("STATUS:", resp.status_code)
+        print("BODY:", resp.text)
+        print("==========================================\n")
+
         resp.raise_for_status()
         return resp.json()
+
+
+
