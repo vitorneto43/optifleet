@@ -1,207 +1,114 @@
 # routes/payments_routes.py
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
-import uuid
-import re
+import os
 
-from billing.pagseguro_client import (
-    criar_pedido_pix_optifleet,
-    criar_pedido_cartao_optifleet,
-    criar_pedido_boleto_optifleet,
+from mercadopago_client import (
+    criar_preferencia_plano,
+    criar_assinatura_mensal,
 )
 
 bp_payments = Blueprint("payments", __name__, url_prefix="/api/payments")
 
-# Valores em CENTAVOS
+# Valores em REAIS
 PLANOS = {
-    "start": 39900,        # R$ 399,00
-    "pro": 149900,         # R$ 1.499,00
-    "enterprise": 220000,  # R$ 2.200,00
+    "start": 399.0,
+    "pro": 1499.0,
+    "enterprise": 2200.0,
 }
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://www.optifleet.com.br")
 
-def _preco_plano(plano: str) -> int:
-    """Retorna o valor em centavos do plano informado."""
+
+def _preco_plano(plano: str) -> float:
     return PLANOS.get(plano, PLANOS["start"])
 
 
-def _tax_id_from_user() -> str:
-    """Garante que o CPF/CNPJ vai só com números."""
-    cpf_cnpj = getattr(current_user, "cpf_cnpj", "") or ""
-    return re.sub(r"\D", "", cpf_cnpj)
-
-
-# ======================================================
-# =======================  PIX  ========================
-# ======================================================
-
-@bp_payments.route("/checkout/pix", methods=["POST"])
+@bp_payments.route("/checkout", methods=["POST"])
 @login_required
-def checkout_pix():
+def checkout_plano():
     """
-    Cria um pedido PIX no PagSeguro.
-    Ex: POST /api/payments/checkout/pix { "plano": "start" }
+    Pagamento ÚNICO do plano (sem recorrência) via Mercado Pago.
+    Usa preference -> init_point (PIX/cartão/boleto).
     """
     data = request.get_json() or {}
-    plano = data.get("plano", "start")
-    total = _preco_plano(plano)
+    plano = (data.get("plan") or "").lower()
 
-    reference_id = f"optifleet-{current_user.id}-{uuid.uuid4().hex[:8]}"
+    if plano not in PLANOS:
+        return jsonify({"error": "Plano inválido"}), 400
 
-    customer = {
-        "name": current_user.name,
-        "email": current_user.email,
-        "tax_id": _tax_id_from_user(),  # CPF ou CNPJ só com números
+    preco = _preco_plano(plano)
+    user_id = getattr(current_user, "id", None)
+
+    if not user_id:
+        return jsonify({"error": "Usuário inválido"}), 400
+
+    external_reference = f"user-{user_id}-plan-{plano}"
+
+    back_urls = {
+        "success": f"{FRONTEND_URL}/checkout/success?plan={plano}",
+        "pending": f"{FRONTEND_URL}/checkout/pending?plan={plano}",
+        "failure": f"{FRONTEND_URL}/checkout/failure?plan={plano}",
     }
 
-    order = criar_pedido_pix_optifleet(reference_id, total, customer)
+    try:
+        pref = criar_preferencia_plano(
+            plano_id=plano,
+            descricao=f"OptiFleet plano {plano.upper()}",
+            preco=preco,
+            external_reference=external_reference,
+            back_urls=back_urls,
+        )
+    except Exception as e:
+        return jsonify({"error": "Falha ao criar preferência", "details": str(e)}), 500
 
-    qr_codes = order.get("qr_codes", [])
-    qr = qr_codes[0] if qr_codes else {}
-
-    return jsonify({
-        "order_id": order.get("id"),
-        "reference_id": order.get("reference_id"),
-        "qr_code_id": qr.get("id"),
-        "qr_code_text": qr.get("text"),  # texto "copia e cola"
-        "qr_code_png": (
-            qr.get("links", [])[0].get("href")
-            if qr.get("links") else None
-        ),
-        "expiration_date": qr.get("expiration_date"),
-        "status": order.get("status"),
-        "plano": plano,
-        "valor_centavos": total,
-    })
+    return jsonify(
+        {
+            "status": "ok",
+            "preference_id": pref.get("id"),
+            "init_point": pref.get("init_point"),
+            "sandbox_init_point": pref.get("sandbox_init_point"),
+        }
+    ), 200
 
 
-# ======================================================
-# ====================  CARTÃO  =======================
-# ======================================================
-
-@bp_payments.route("/checkout/card", methods=["POST"])
+@bp_payments.route("/subscribe", methods=["POST"])
 @login_required
-def checkout_card():
+def subscribe_plano():
     """
-    Cria um pedido via cartão de crédito no PagSeguro.
-    Ex: POST /api/payments/checkout/card
-    Body:
-    {
-      "plano": "pro",
-      "encrypted_card": "...",
-      "security_code": "123",
-      "installments": 1
-    }
+    ASSINATURA MENSAL (recorrente).
+    Cria um preapproval no Mercado Pago.
     """
     data = request.get_json() or {}
-    plano = data.get("plano", "start")
-    total = _preco_plano(plano)
+    plano = (data.get("plan") or "").lower()
 
-    encrypted_card = data.get("encrypted_card")
-    security_code = data.get("security_code")
-    installments = int(data.get("installments") or 1)
+    if plano not in PLANOS:
+        return jsonify({"error": "Plano inválido"}), 400
 
-    if not encrypted_card or not security_code:
-        return jsonify({
-            "error": "encrypted_card e security_code são obrigatórios."
-        }), 400
+    preco = _preco_plano(plano)
+    user_id = getattr(current_user, "id", None)
+    email = getattr(current_user, "email", None)
 
-    reference_id = f"optifleet-{current_user.id}-{uuid.uuid4().hex[:8]}"
+    if not user_id or not email:
+        return jsonify({"error": "Usuário sem id/email"}), 400
 
-    customer = {
-        "name": current_user.name,
-        "email": current_user.email,
-        "tax_id": _tax_id_from_user(),
-    }
+    external_reference = f"user-{user_id}-plan-{plano}"
 
-    order = criar_pedido_cartao_optifleet(
-        reference_id=reference_id,
-        total_centavos=total,
-        customer=customer,
-        encrypted_card=encrypted_card,
-        security_code=security_code,
-        installments=installments,
-    )
+    try:
+        preapproval = criar_assinatura_mensal(
+            plano_id=plano,
+            descricao=f"Assinatura OptiFleet plano {plano.upper()}",
+            preco=preco,
+            payer_email=email,
+            external_reference=external_reference,
+        )
+    except Exception as e:
+        return jsonify({"error": "Falha ao criar assinatura", "details": str(e)}), 500
 
-    return jsonify({
-        "order_id": order.get("id"),
-        "reference_id": order.get("reference_id"),
-        "status": order.get("status"),
-        "charges": order.get("charges", []),
-        "plano": plano,
-        "valor_centavos": total,
-    })
-
-
-# ======================================================
-# ====================  BOLETO  =======================
-# ======================================================
-
-@bp_payments.route("/checkout/boleto", methods=["POST"])
-@login_required
-def checkout_boleto():
-    """
-    Cria um pedido via Boleto no PagSeguro.
-    Ex: POST /api/payments/checkout/boleto { "plano": "enterprise" }
-    """
-    data = request.get_json() or {}
-    plano = data.get("plano", "start")
-    total = _preco_plano(plano)
-
-    reference_id = f"optifleet-{current_user.id}-{uuid.uuid4().hex[:8]}"
-
-    customer = {
-        "name": current_user.name,
-        "email": current_user.email,
-        "tax_id": _tax_id_from_user(),
-    }
-
-    order = criar_pedido_boleto_optifleet(
-        reference_id=reference_id,
-        total_centavos=total,
-        customer=customer,
-    )
-
-    charges = order.get("charges", [])
-    charge = charges[0] if charges else {}
-
-    boleto_info = charge.get("payment_method", {}).get("boleto", {})
-
-    return jsonify({
-        "order_id": order.get("id"),
-        "reference_id": order.get("reference_id"),
-        "status": order.get("status"),
-        "charges": charges,
-        "boleto": boleto_info,  # barcode, due_date etc.
-        "plano": plano,
-        "valor_centavos": total,
-    })
-
-
-# ======================================================
-# ===================  WEBHOOK  =======================
-# ======================================================
-
-@bp_payments.route("/webhook", methods=["POST"])
-def pagseguro_webhook():
-    """
-    Webhook chamado pelo PagSeguro quando o status da cobrança mudar.
-    URL no PagSeguro: https://www.optifleet.com.br/api/payments/webhook
-    """
-    event = request.get_json() or {}
-
-    charge = (event.get("data") or {}).get("charge") or {}
-    charge_id = charge.get("id")
-    status = charge.get("status")
-
-    # Aqui você pode logar para auditoria se quiser
-    # print("Webhook PagSeguro:", charge_id, status, flush=True)
-
-    if status == "PAID":
-        # TODO: chamar função que ativa plano no banco:
-        # ativar_plano_usuario(event)
-        pass
-
-    return jsonify({"success": True}), 200
-
-
+    return jsonify(
+        {
+            "status": "ok",
+            "preapproval_id": preapproval.get("id"),
+            "init_point": preapproval.get("init_point"),  # redirecionar o usuário
+        }
+    ), 200

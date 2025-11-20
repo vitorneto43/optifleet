@@ -44,7 +44,7 @@
       </div>
 
       <div class="row">
-        <a class="btn" href="javascript:void(0)" onclick="go('start')">Contratar</a>
+        <a class="btn" href="javascript:void(0)" onclick="assinarPlano('start')">Contratar</a>
         <span class="muted">Pague com Pix, cartão ou boleto</span>
       </div>
     </div>
@@ -64,7 +64,7 @@
       </div>
 
       <div class="row">
-        <a class="btn" href="javascript:void(0)" onclick="go('pro')">Contratar</a>
+        <a class="btn" href="javascript:void(0)" onclick="assinarPlano('pro')">Contratar</a>
         <span class="muted">Pague com Pix, cartão ou boleto</span>
       </div>
     </div>
@@ -90,12 +90,10 @@
       </div>
 
       <div class="row">
-        <a class="btn" href="javascript:void(0)" onclick="go('enterprise')">Assinar Enterprise</a>
+        <a class="btn" href="javascript:void(0)" onclick="assinarPlano('enterprise')">Assinar Enterprise</a>
         <span class="muted">Pague com Pix, cartão ou boleto</span>
       </div>
     </div>
-
-
   </div>
 
   <div style="margin-top:16px">
@@ -104,39 +102,29 @@
 </div>
 
 <script>
-function go(plan, billingOverride) {
-  const vInput = document.getElementById(`v-${plan}`);
-  const bSelect = document.getElementById(`b-${plan}`);
+async function assinarPlano(plan) {
+  try {
+    const resp = await fetch('/api/payments/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan }),
+    });
 
-  let vehicles = 1;
-  if (vInput && vInput.value) {
-    vehicles = parseInt(vInput.value, 10);
+    const data = await resp.json();
+
+    if (data.init_point) {
+      // Redireciona para o checkout do Mercado Pago
+      window.location.href = data.init_point;
+    } else {
+      alert('Erro ao iniciar assinatura: ' + (data.error || 'Falha desconhecida'));
+      console.error('Resposta subscribe:', data);
+    }
+  } catch (e) {
+    console.error('Erro na chamada /api/payments/subscribe:', e);
+    alert('Erro de comunicação com o servidor. Tente novamente em alguns instantes.');
   }
-
-  // regras por plano
-  if (plan === 'start') {
-    if (isNaN(vehicles) || vehicles < 1) vehicles = 1;
-    if (vehicles > 5) vehicles = 5;
-  } else if (plan === 'pro') {
-    if (isNaN(vehicles) || vehicles < 6) vehicles = 6;
-    if (vehicles > 50) vehicles = 50;
-  } else if (plan === 'enterprise') {
-    // deixa passar o que o cliente digitou, mínimo 51
-    if (isNaN(vehicles) || vehicles < 51) vehicles = 51;
-    // sem limite máximo
-  }
-
-  // por enquanto só mensal
-  const billing = billingOverride || (bSelect && bSelect.value ? bSelect.value : 'monthly');
-
-  const url = new URL('{{ url_for("billing.go_checkout") }}', window.location.origin);
-  url.searchParams.set('plan', plan);
-  url.searchParams.set('billing', billing);
-  url.searchParams.set('vehicles', vehicles);
-  window.location.href = url.toString();
 }
 </script>
-
 
 </body>
 </html>

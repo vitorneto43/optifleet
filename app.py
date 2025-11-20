@@ -43,6 +43,7 @@ from routes.demo_routes import bp_demo
 from routes.account_routes import bp_account
 from routes.admin_routes import admin_bp
 from routes.payments_routes import bp_payments
+from routes.webhooks_routes import bp_webhooks
 
 
 # ===== Solver / Providers / Maintenance =====
@@ -1565,7 +1566,7 @@ app.register_blueprint(bp_checkout)
 app.register_blueprint(bp_demo)
 app.register_blueprint(bp_account)
 app.register_blueprint(bp_payments)
-
+app.register_blueprint(bp_webhooks)
 
 # -----------------------------------------------------------------------------
 # Run (dev)
