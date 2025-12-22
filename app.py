@@ -1,759 +1,1592 @@
+# app.py
+from dotenv import load_dotenv
+load_dotenv()  # 👈 TEM QUE SER A PRIMEIRA COISA
+from pathlib import Path
 import os
-import re
-import base64
-import requests
-
-import cloudinary
-import cloudinary.uploader
+import time
+from datetime import date, datetime, timedelta, timezone
+from math import radians, sin, cos, sqrt, atan2
+import json
+import csv
+from io import StringIO, BytesIO
 
 from flask import (
-    Flask,
-    request,
-    jsonify,
-    render_template,
-    redirect,
-    url_for,
-    flash,
-    abort,
-    session,
+    Flask, request, jsonify, render_template,
+    redirect, url_for, flash, send_file, abort
 )
 
-from sqlalchemy import or_
-from flask_migrate import Migrate
-from werkzeug.utils import secure_filename
+from flask_login import (
+    LoginManager, login_required, current_user
+)
 
-from config import Config
-from models import db, Dev, Repo, Deploy, Portfolio, PortfolioMedia, User, MediaUpload  # ajuste conforme seus models
+# ===== Core / DB / Visual =====
+from core.visual.map_render import build_map, _coerce_path_to_coords
+from core.db import (
+    get_user_by_id, obter_posicoes, get_active_subscription, get_active_trial,
+    create_trial, expire_trial, trial_users_upsert, trial_users_summary,
+    list_trial_users, trial_users_backfill_from_trials, get_conn
+)
+from core.db_connection import close_db
+
+# ===== Rotas/Blueprints =====
+from routes.auth_routes import bp_auth
+from routes.fleet_routes import bp_fleet
+from routes.telemetry_routes import bp_tele
+from routes.reroute_routes import bp_reroute
+from routes.notify_routes import bp_notify
+from routes.vendor_ingest_routes import bp_vendor
+from routes.billing_routes import bp_billing
+from routes.trial_routes import bp_trial
+from routes.contact_routes import bp_contact
+from routes.checkout_routes import bp_checkout
+from routes.demo_routes import bp_demo
+from routes.account_routes import bp_account
+from routes.admin_routes import admin_bp
+from routes.payments_routes import bp_payments
+from routes.webhooks_routes import bp_webhooks
 
 
-def create_app():
-    app = Flask(__name__)
-    app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_change_me")
+# ===== Solver / Providers / Maintenance =====
+from core.models import Location, TimeWindow, Depot, Vehicle, Stop, OptimizeRequest, hhmm_to_minutes
+from core.providers.maps import RoutingProvider
+from core.solver.vrptw import solve_vrptw
+from core.maintenance.predictor import predict_failure_risk
+from core.telemetry import salvar_telemetria
 
-    # =========================
-    # CONFIG / DB
-    # =========================
-    raw_db_url = os.environ.get("DATABASE_URL", "sqlite:///app.db")
-    if raw_db_url.startswith("postgres://"):
-        raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
+# -----------------------------------------------------------------------------
+# App / Config
+# -----------------------------------------------------------------------------
+load_dotenv()
+app = Flask(__name__, template_folder="templates", static_folder="static")
+app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret-change-me")
 
-    app.config["SQLALCHEMY_DATABASE_URI"] = raw_db_url
-    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-    app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=False,
+)
+app.register_blueprint(admin_bp, url_prefix="/admin")
 
-    db.init_app(app)
-    Migrate(app, db)
+AUTO_TRIAL = os.getenv("AUTO_TRIAL", "1") == "1"
+DEFAULT_TRIAL_PLAN = os.getenv("DEFAULT_TRIAL_PLAN", "full")
+DEFAULT_TRIAL_VEHICLES = int(os.getenv("DEFAULT_TRIAL_VEHICLES", "10"))
+# 15 dias reais
+DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "15"))
 
-    # =========================
-    # UPLOAD CONFIG
-    # =========================
-    ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
-    ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "webm"}
-    ALLOWED_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS
+_last_audit_time = {}
 
-    def allowed_file(filename: str) -> bool:
-        return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+# === Diretórios base para os mapas ===
+BASE_DIR = Path(__file__).resolve().parent
+MAP_DIR = BASE_DIR / "mapfile"
+MAP_DIR.mkdir(exist_ok=True)
+# -----------------------------------------------------------------------------
+# SQL helpers (COMPATÍVEIS COM DUCKDB)
+# -----------------------------------------------------------------------------
+def _dialect():
+    """Identifica DuckDB explicitamente"""
+    return "duckdb"  # Já sabemos que é DuckDB
 
-    # =========================
-    # CLOUDINARY CONFIG
-    # =========================
-    cloudinary.config(
-        cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME"),
-        api_key=os.environ.get("CLOUDINARY_API_KEY"),
-        api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
-        secure=True,
+def _sql_now():
+    return "NOW()"
+
+def _sql_date(expr):
+    return f"CAST({expr} AS DATE)"
+
+def _sql_hours_ago(hours:int):
+    return f"NOW() - INTERVAL '{hours} hours'"
+
+def _sql_minutes_ago(minutes:int):
+    return f"NOW() - INTERVAL '{minutes} minutes'"
+
+def _sql_this_week_start():
+    return "CURRENT_DATE - INTERVAL '6 days'"  # Simplificado para DuckDB
+
+def _has_column(conn, table, column):
+    """Verifica se coluna existe (compatível com DuckDB) - CORRIGIDO"""
+    try:
+        result = conn.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = ? AND column_name = ?
+        """, [table.lower(), column.lower()]).fetchone()
+        return result is not None
+    except Exception:
+        return False
+
+# -----------------------------------------------------------------------------
+# Bootstrap admin em DuckDB (CORRIGIDO)
+# -----------------------------------------------------------------------------
+def _bootstrap_duckdb_admin():
+    from core.db import get_conn
+    admin_email = os.getenv("ADMIN_EMAIL")
+    if not admin_email:
+        return
+    try:
+        con = get_conn()
+        # Verifica se coluna is_admin existe
+        has_admin_col = _has_column(con, "users", "is_admin")
+        if not has_admin_col:
+            con.execute("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE")
+        con.execute("UPDATE users SET is_admin = TRUE WHERE email = ?", (admin_email,))
+        con.close()
+    except Exception as e:
+        print(f"[admin bootstrap] erro: {e}")
+
+_bootstrap_duckdb_admin()
+
+# -----------------------------------------------------------------------------
+# Utils / Helpers
+# -----------------------------------------------------------------------------
+def _parse_dt_any(val):
+    """Converte str/naive/aware -> aware UTC. Retorna None se não der."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.astimezone(timezone.utc) if val.tzinfo else val.replace(tzinfo=timezone.utc)
+    if isinstance(val, (int, float)):
+        try:
+            return datetime.fromtimestamp(val, tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(val, str):
+        s = val.strip()
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%Y",
+        ):
+            try:
+                dt = datetime.strptime(s, fmt)
+                return dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+    return None
+
+def _status_of(record, idx_if_tuple=None, key_if_dict="status"):
+    """Extrai status robustamente de tupla ou dict."""
+    if not record:
+        return ""
+    try:
+        if hasattr(record, "get"):
+            val = record.get(key_if_dict)
+            if val is not None:
+                return str(val).lower()
+    except Exception:
+        pass
+    if idx_if_tuple is not None:
+        try:
+            return str(record[idx_if_tuple]).lower()
+        except Exception:
+            pass
+    return ""
+
+def _trial_status_of(trial):
+    return _status_of(trial, idx_if_tuple=5, key_if_dict="status")  # DuckDB: índice 5 para status
+
+def _trial_end_of(trial):
+    """Extrai trial_end de dict ou tupla e padroniza para datetime aware UTC."""
+    if not trial:
+        return None
+    if hasattr(trial, "get"):
+        end = trial.get("trial_end") or trial.get("end") or trial.get("trialEnd")
+        return _parse_dt_any(end)
+    for idx in (4, 3):  # DuckDB: trial_end no índice 4
+        try:
+            return _parse_dt_any(trial[idx])
+        except Exception:
+            continue
+    return None
+
+def _sub_status_of(sub):
+    return _status_of(sub, idx_if_tuple=4, key_if_dict="status")  # DuckDB: índice 4 para status
+
+def _days_left(trial):
+    """Dias restantes inteiros (ceil)."""
+    end = _trial_end_of(trial)
+    if not end:
+        return None
+    now = datetime.now(timezone.utc)
+    sec = (end - now).total_seconds()
+    if sec <= 0:
+        return 0
+    from math import ceil
+    return int(ceil(sec / 86400))
+
+def _ensure_trial(user_id: int):
+    if not AUTO_TRIAL or not user_id:
+        return
+    trial = get_active_trial(user_id)
+    if trial:
+        return
+    try:
+        create_trial(
+            user_id=user_id,
+            plan=DEFAULT_TRIAL_PLAN,
+            vehicles=DEFAULT_TRIAL_VEHICLES,
+            days=DEFAULT_TRIAL_DAYS,
+        )
+        print(f"[trial] criado para user {user_id}")
+    except Exception as e:
+        print("[trial] falhou ao criar:", e)
+
+def _parse_maybe_dt(x):
+    """Converte str/None/datetime em datetime timezone-aware (UTC) ou None."""
+    if x is None:
+        return None
+    if isinstance(x, datetime):
+        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+    if isinstance(x, str):
+        s = x.strip().replace("Z", "")
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(s.split(".")[0], fmt)
+                return dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+        try:
+            dt = datetime.fromisoformat(s.split(".")[0])
+            return dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+def _iso_utc(dt):
+    """Retorna ISO8601 em UTC com 'Z' no final, ou ''."""
+    if not dt:
+        return ""
+    if isinstance(dt, str):
+        dt = _parse_maybe_dt(dt)
+    if not dt:
+        return ""
+    if dt.tzinfo:
+        dt = dt.astimezone(timezone.utc)
+    else:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# -----------------------------------------------------------------------------
+# Login / Session
+# -----------------------------------------------------------------------------
+login_manager = LoginManager()
+login_manager.login_view = "auth.login_page"
+login_manager.init_app(app)
+
+@app.teardown_appcontext
+def teardown_db(exception):
+    close_db()
+
+@login_manager.user_loader
+def load_user(user_id: str):
+    row = get_user_by_id(int(user_id))
+    if not row:
+        return None
+    class UserObj:
+        def __init__(self, id, email):
+            self.id = str(id)
+            self.email = email
+        @property
+        def is_authenticated(self): return True
+        @property
+        def is_active(self): return True
+        @property
+        def is_anonymous(self): return False
+        def get_id(self): return self.id
+    return UserObj(row["id"], row["email"])
+
+@app.context_processor
+def inject_globals():
+    uid = int(getattr(current_user, "id", 0) or 0)
+    sub = get_active_subscription(uid) if uid else None
+    trial = get_active_trial(uid) if uid else None
+    return {
+        "user_email": getattr(current_user, "email", None),
+        "sub": sub,
+        "trial": trial,
+        "days_left": _days_left(trial),
+    }
+
+
+# app.py - no before_request, ajuste a chamada:
+@app.before_request
+def _sync_trial_audit_and_expire():
+    """
+    Versão otimizada que evita auditorias muito frequentes para o mesmo usuário.
+    """
+    try:
+        uid = int(getattr(current_user, "id", 0) or 0)
+        if not uid:
+            return
+
+        # Rate limiting: máximo 1 auditoria por minuto por usuário
+        current_time = time.time()
+        last_time = _last_audit_time.get(uid, 0)
+        if current_time - last_time < 60:  # 60 segundos
+            return
+
+        _last_audit_time[uid] = current_time
+
+        trial = get_active_trial(uid)
+        if not trial:
+            return
+
+        # Verifica expiração
+        end = _trial_end_of(trial)
+        if end is not None:
+            now = datetime.now(timezone.utc)
+            if end < now:
+                try:
+                    tid = trial.get("id") if hasattr(trial, "get") else trial[0]
+                    if tid:
+                        expire_trial(tid)
+                        print(f"[trial] expirado para user {uid}")
+                except Exception as e:
+                    print(f"[expire_trial] erro: {e}")
+                return
+
+        # Auditoria - apenas dados essenciais
+        trial_start = None
+        if hasattr(trial, "get"):
+            trial_start = _parse_dt_any(trial.get("started_at") or trial.get("start"))
+        else:
+            for idx in (3, 2):
+                try:
+                    trial_start = _parse_dt_any(trial[idx])
+                    break
+                except Exception:
+                    continue
+
+        # Converte para string de forma segura
+        def _safe_isoformat(dt):
+            if not dt:
+                return None
+            if isinstance(dt, str):
+                return dt
+            try:
+                return dt.isoformat()
+            except Exception:
+                return None
+
+        trial_start_str = _safe_isoformat(trial_start)
+        trial_end_str = _safe_isoformat(end)
+        is_converted = (_trial_status_of(trial) == "converted")
+
+        # UPSERT com tratamento silencioso de erro
+        try:
+            trial_users_upsert(
+                user_id=uid,
+                email=(getattr(current_user, "email", "") or ""),
+                nome=None,
+                trial_start=trial_start_str,
+                trial_end=trial_end_str,
+                converted=is_converted,
+            )
+        except Exception as e:
+            # Log silencioso - não polui os logs
+            pass
+
+    except Exception as e:
+        # Log silencioso para erros gerais
+        pass
+
+# -----------------------------------------------------------------------------
+# Infra inicial (tabelas auxiliares)
+# -----------------------------------------------------------------------------
+with get_conn() as con:
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS last_plans (
+            user_id     INTEGER,
+            created_at  TIMESTAMP,
+            req_json    TEXT,
+            routes_json TEXT,
+            map_url     TEXT,
+            path_json   TEXT
+        );
+    """)
+
+# -----------------------------------------------------------------------------
+# Assets / Providers
+# -----------------------------------------------------------------------------
+(Path(app.static_folder) / "maps").mkdir(parents=True, exist_ok=True)
+rp = RoutingProvider()
+
+try:
+    salvar_telemetria("empresa_123", "V1", -8.05, -34.9, 60.5, 80.0)
+except Exception:
+    pass
+
+# -----------------------------------------------------------------------------
+# Rotas simples
+# -----------------------------------------------------------------------------
+@app.get("/", endpoint="home")
+def home_public():
+    if getattr(current_user, "is_authenticated", False):
+        uid = int(current_user.id)
+        sub = get_active_subscription(uid)
+        trial = get_active_trial(uid)
+        ok_sub = (_sub_status_of(sub) == "active")
+        ok_trial = (_trial_status_of(trial) == "active")
+        if ok_sub or ok_trial:
+            return redirect(url_for("dashboard"))
+        return render_template("landing.html", paywall_hint=True, days_left=_days_left(trial))
+    return render_template("landing.html")
+
+@app.get("/site")
+def landing():
+    return render_template("landing.html")
+
+@app.get("/app")
+@login_required
+def dashboard():
+    uid = int(current_user.id)
+    _ensure_trial(uid)
+
+    sub = get_active_subscription(uid)
+    trial = get_active_trial(uid)
+    ok_sub = (_sub_status_of(sub) == "active")
+    ok_trial = (_trial_status_of(trial) == "active")
+
+    if ok_sub or ok_trial:
+        kpis = {"total_veiculos": 12, "viagens_hoje": 8, "viagens_semana": 43, "alertas": 3}
+        return render_template("index.html", hide_paywall=True, kpis=kpis)
+
+    return redirect(url_for("billing.pricing_page"))
+
+@app.get("/pricing")
+def pricing_alias():
+    return redirect(url_for("billing.pricing_page"))
+
+@app.get("/vehicles")
+@login_required
+def vehicles_page():
+    return render_template("vehicles.html")
+
+@app.get("/tracking")
+@login_required
+def tracking():
+    return render_template("telemetry.html")  # <- troca o template
+
+@app.get("/link_tracker")
+@login_required
+def link_tracker_page():
+    return render_template("link_tracker.html")
+
+
+@app.get("/contact")
+def contact_page():
+    return render_template("contact.html", today=date.today().strftime("%d/%m/%Y"))
+
+@app.post("/contact")
+def contact_submit():
+    name = (request.form.get("name") or "").strip()
+    email = (request.form.get("email") or "").strip()
+    company = (request.form.get("company") or "").strip()
+    message = (request.form.get("message") or "").strip()
+    print("[CONTACT]", {"name": name, "email": email, "company": company, "message": message, "ip": request.remote_addr})
+    flash("Recebemos sua mensagem. Em breve entraremos em contato.", "success")
+    return redirect(url_for("contact_thanks"))
+
+@app.get("/contact/thanks")
+def contact_thanks():
+    return render_template("contact_thanks.html", today=date.today().strftime("%d/%m/%Y"))
+
+@app.get("/terms")
+def terms_page():
+    return render_template("terms.html", today=date.today().strftime("%d/%m/%Y"))
+
+@app.get("/privacy")
+def privacy_page():
+    return render_template("privacy.html", today=date.today().strftime("%d/%m/%Y"))
+
+@app.get("/_routes")
+def _routes():
+    lines = []
+    for r in sorted(app.url_map.iter_rules(), key=lambda x: x.rule):
+        methods = ",".join(sorted(m for m in r.methods if m in {"GET","POST","PUT","PATCH","DELETE"}))
+        lines.append(f"{r.rule}  ->  {r.endpoint}  [{methods}]")
+    return "<pre>" + "\n".join(lines) + "</pre>"
+
+@app.get("/demo")
+def demo_page():
+    return render_template("demo.html")
+
+@app.get("/admin/trials")
+@login_required
+def admin_trials():
+    try:
+        uid = int(current_user.id)
+        me = get_user_by_id(uid)
+        is_admin = False
+        if me:
+            # DuckDB retorna boolean para is_admin
+            is_admin = bool(me.get("is_admin")) if hasattr(me, "get") else bool(me["is_admin"])
+        if not is_admin:
+            return "Forbidden", 403
+    except Exception:
+        return "Forbidden", 403
+
+    status = (request.args.get("status") or "").strip().lower() or None
+    rows = list_trial_users(status=status, limit=500, offset=0)
+    summary = trial_users_summary() or {}
+
+    html = []
+    html.append("<h2>Trials (auditoria)</h2>")
+    if isinstance(summary, dict):
+        resumo = ", ".join([f"{k}: {v}" for k, v in summary.items()])
+    else:
+        resumo = str(summary)
+    html.append(f"<p>Resumo: {resumo}</p>")
+    html.append("""
+        <p>Filtrar:
+          <a href="/admin/trials">todos</a> |
+          <a href="/admin/trials?status=ativo">ativos</a> |
+          <a href="/admin/trials?status=expirado">expirados</a> |
+          <a href="/admin/trials?status=convertido">convertidos</a>
+        </p>
+    """)
+    html.append('<table border="1" cellspacing="0" cellpadding="6">')
+    html.append("<tr><th>User ID</th><th>Email</th><th>Nome</th><th>Início</th><th>Fim</th><th>Status</th><th>Atualizado</th></tr>")
+
+    for r in rows or []:
+        if hasattr(r, "get"):
+            user_id = r.get("user_id")
+            email = r.get("email")
+            nome = r.get("nome") or ""
+            ts = r.get("trial_start")
+            te = r.get("trial_end")
+            st = r.get("status")
+            upd = r.get("updated_at") or r.get("updated")
+        else:
+            user_id, email, nome, ts, te, st, upd = (list(r) + [None]*7)[:7]
+
+        html.append(
+            f"<tr><td>{user_id}</td><td>{email}</td><td>{nome or ''}</td>"
+            f"<td>{ts}</td><td>{te}</td><td>{st}</td><td>{upd}</td></tr>"
+        )
+
+    html.append("</table>")
+    return "".join(html)
+
+@app.get("/admin/trials/backfill")
+@login_required
+def admin_trials_backfill():
+    try:
+        if int(current_user.id) != 1:
+            return "Forbidden", 403
+    except Exception:
+        return "Forbidden", 403
+
+    trial_users_backfill_from_trials()
+    return redirect(url_for("admin_trials"))
+
+# -----------------------------------------------------------------------------
+# KPIs (compatível com DuckDB)
+# -----------------------------------------------------------------------------
+@app.get("/api/kpis")
+@login_required
+def api_kpis():
+    out = {"total_veiculos": 0, "viagens_hoje": 0, "viagens_semana": 0, "alertas": 0}
+    try:
+        conn = get_conn()
+
+        # total_veiculos nos últimos 5 min
+        try:
+            out["total_veiculos"] = conn.execute(f"""
+                SELECT COUNT(DISTINCT vehicle_id)
+                FROM telemetry
+                WHERE timestamp >= {_sql_minutes_ago(5)}
+            """).fetchone()[0] or 0
+        except Exception:
+            pass
+
+        desloc_thresh = 0.01
+
+        # viagens_hoje (>= 20 pontos e deslocamento mínimo)
+        try:
+            out["viagens_hoje"] = conn.execute(f"""
+                SELECT COUNT(*) FROM (
+                  SELECT vehicle_id
+                  FROM telemetry
+                  WHERE {_sql_date("timestamp")} = {_sql_date("CURRENT_TIMESTAMP")}
+                  GROUP BY vehicle_id
+                  HAVING COUNT(*) >= 20
+                     AND ( (MAX(lat)-MIN(lat)) + (MAX(lon)-MIN(lon)) ) > {desloc_thresh}
+                ) t
+            """).fetchone()[0] or 0
+        except Exception:
+            pass
+
+        # viagens_semana ~ últimos 7 dias
+        try:
+            out["viagens_semana"] = conn.execute(f"""
+                SELECT COUNT(*) FROM (
+                  SELECT vehicle_id
+                  FROM telemetry
+                  WHERE {_sql_date("timestamp")} >= {_sql_this_week_start()}
+                  GROUP BY vehicle_id
+                  HAVING COUNT(*) >= 60
+                     AND ( (MAX(lat)-MIN(lat)) + (MAX(lon)-MIN(lon)) ) > {desloc_thresh}
+                ) t
+            """).fetchone()[0] or 0
+        except Exception:
+            pass
+
+        # alertas: overspeed na última hora
+        try:
+            if _has_column(conn, "telemetry", "speed"):
+                out["alertas"] = conn.execute(f"""
+                    SELECT COUNT(*)
+                    FROM telemetry
+                    WHERE timestamp >= {_sql_minutes_ago(60)}
+                      AND COALESCE(speed, 0) > 100
+                """).fetchone()[0] or 0
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+    return jsonify(out)
+
+# -----------------------------------------------------------------------------
+# Telemetria (APIs) — consultas compatíveis com DuckDB
+# -----------------------------------------------------------------------------
+@app.get("/api/telemetry")
+@login_required
+def api_telemetry():
+    client_id = int(current_user.id)
+    rows = obter_posicoes(client_id)
+    return jsonify(rows)
+
+def _haversine_km(a_lat, a_lon, b_lat, b_lon):
+    R = 6371.0
+    dlat = radians(b_lat - a_lat)
+    dlon = radians(b_lon - a_lon)
+    la1 = radians(a_lat); lo1 = radians(a_lon); la2 = radians(b_lat); lo2 = radians(b_lon)
+    h = sin(dlat/2)**2 + cos(la1)*cos(la2)*sin(dlon/2)**2
+    return 2*R*atan2(sqrt(h), sqrt(1-h))
+
+def _bearing_deg(a_lat, a_lon, b_lat, b_lon):
+    la1, la2, dlon = radians(a_lat), radians(b_lat), radians(b_lon - a_lon)
+    x = sin(dlon)*cos(la2)
+    y = cos(la1)*sin(la2) - sin(la1)*cos(la2)*cos(dlon)
+    br = (atan2(x, y) * 180.0 / 3.141592653589793)
+    return (br + 360) % 360
+
+def _turn_delta(a, b):
+    d = abs(a - b)
+    return d if d <= 180 else 360 - d
+
+def _fetch_points(hours:int, vehicle_id:str|None=None, limit:int=20000):
+    conn = get_conn()
+    if vehicle_id:
+        rows = conn.execute(f"""
+            SELECT vehicle_id, lat, lon, timestamp AS ts, COALESCE(speed,0) AS speed
+            FROM telemetry
+            WHERE timestamp >= {_sql_hours_ago(hours)}
+              AND vehicle_id = ?
+            ORDER BY ts
+            LIMIT ?
+        """, [vehicle_id, limit]).fetchall()
+    else:
+        rows = conn.execute(f"""
+            SELECT vehicle_id, lat, lon, timestamp AS ts, COALESCE(speed,0) AS speed
+            FROM telemetry
+            WHERE timestamp >= {_sql_hours_ago(hours)}
+            ORDER BY vehicle_id, ts
+            LIMIT ?
+        """, [limit]).fetchall()
+
+    pts = []
+    for r in rows:
+        try:
+            pts.append({
+                "vehicle_id": str(r[0]),
+                "lat": float(r[1]),
+                "lon": float(r[2]),
+                "ts": str(r[3]),
+                "speed": float(r[4]),
+                "bearing": None,
+            })
+        except Exception:
+            continue
+    return pts
+
+def _detect_events(points, overspeed_kmh=100, stop_speed_kmh=3, stop_min_minutes=5, harsh_turn_deg=60):
+    events = []
+    if not points:
+        return events
+
+    from itertools import groupby
+    for vid, group in groupby(points, key=lambda x: x["vehicle_id"]):
+        g = list(group)
+
+        # overspeed
+        for p in g:
+            if p["speed"] > overspeed_kmh:
+                events.append({
+                    "type": "overspeed", "vehicle_id": vid,
+                    "lat": p["lat"], "lon": p["lon"], "ts": p["ts"],
+                    "value": p["speed"]
+                })
+
+        # paradas
+        start_idx = None
+        for i, p in enumerate(g):
+            if p["speed"] < stop_speed_kmh:
+                if start_idx is None:
+                    start_idx = i
+            else:
+                if start_idx is not None:
+                    st = g[start_idx]["ts"]; en = g[i-1]["ts"]
+                    try:
+                        t0 = datetime.fromisoformat(str(st).replace("Z","").split(".")[0])
+                        t1 = datetime.fromisoformat(str(en).replace("Z","").split(".")[0])
+                        mins = (t1 - t0).total_seconds()/60.0
+                    except Exception:
+                        mins = 0
+                    if mins >= stop_min_minutes:
+                        mid = g[(start_idx + i-1)//2]
+                        events.append({
+                            "type": "stop", "vehicle_id": vid,
+                            "lat": mid["lat"], "lon": mid["lon"], "ts": str(en),
+                            "minutes": round(mins, 1)
+                        })
+                    start_idx = None
+        if start_idx is not None and len(g) - start_idx >= 2:
+            st = g[start_idx]["ts"]; en = g[-1]["ts"]
+            try:
+                t0 = datetime.fromisoformat(str(st).replace("Z","").split(".")[0])
+                t1 = datetime.fromisoformat(str(en).replace("Z","").split(".")[0])
+                mins = (t1 - t0).total_seconds()/60.0
+            except Exception:
+                mins = 0
+            if mins >= stop_min_minutes:
+                mid = g[(start_idx + len(g)-1)//2]
+                events.append({
+                    "type": "stop", "vehicle_id": vid,
+                    "lat": mid["lat"], "lon": mid["lon"], "ts": str(en),
+                    "minutes": round(mins, 1)
+                })
+
+        # curvas bruscas
+        for i in range(1, len(g)):
+            a, b = g[i-1], g[i]
+            try:
+                br1 = _bearing_deg(a["lat"], a["lon"], b["lat"], b["lon"])
+            except Exception:
+                continue
+            if i >= 2:
+                c = g[i-2]
+                try:
+                    br0 = _bearing_deg(c["lat"], c["lon"], a["lat"], a["lon"])
+                    delta = _turn_delta(br0, br1)
+                    if delta >= harsh_turn_deg:
+                        events.append({
+                            "type": "harsh_turn", "vehicle_id": vid,
+                            "lat": a["lat"], "lon": a["lon"], "ts": a["ts"],
+                            "delta_deg": round(delta, 0)
+                        })
+                except Exception:
+                    pass
+    return events
+
+@app.get("/api/telemetry/history")
+@login_required
+def api_telemetry_history():
+    hours = int(request.args.get("hours", 6))
+    vid = request.args.get("vehicle_id")
+    pts = _fetch_points(hours, vid)
+    return jsonify(pts)
+
+@app.get("/api/telemetry/events")
+@login_required
+def api_telemetry_events():
+    hours = int(request.args.get("hours", 6))
+    vid = request.args.get("vehicle_id")
+    overspeed = float(request.args.get("overspeed", 100))
+    stop_speed = float(request.args.get("stop_speed", 3))
+    stop_minutes = float(request.args.get("stop_minutes", 5))
+    harsh_turn = float(request.args.get("harsh_turn", 60))
+    buffer_km = float(request.args.get("offroute_km", 0.3))
+
+    pts = _fetch_points(hours, vid)
+    ev = _detect_events(
+        pts,
+        overspeed_kmh=overspeed,
+        stop_speed_kmh=stop_speed,
+        stop_min_minutes=stop_minutes,
+        harsh_turn_deg=harsh_turn
     )
 
-    def save_upload_cloudinary(file_storage, folder: str):
-        """
-        Retorna (url, file_type) onde file_type é 'image' ou 'video'
-        """
-        if not file_storage or not getattr(file_storage, "filename", ""):
-            return (None, None)
+    paths_by_vehicle = {}
+    try:
+        uid = int(current_user.id)
+        row = get_conn().execute("""
+            SELECT path_json
+            FROM last_plans
+            WHERE user_id = ?
+            ORDER BY created_at DESC LIMIT 1
+        """, [uid]).fetchone()
+        if row and row[0]:
+            paths_by_vehicle = json.loads(row[0])
+    except Exception as e:
+        print("[offroute] falha ao carregar path_json:", e)
 
-        if not allowed_file(file_storage.filename):
-            return (None, None)
+    # Função auxiliar para calcular distância ponto-linha
+    def _point_to_linestring_km(point, line):
+        min_dist = float('inf')
+        for i in range(len(line)-1):
+            a = line[i]
+            b = line[i+1]
+            dist = _haversine_km(point[0], point[1], a[0], a[1])
+            min_dist = min(min_dist, dist)
+        return min_dist
 
-        filename = secure_filename(file_storage.filename)
-        ext = filename.rsplit(".", 1)[1].lower()
-        resource_type = "video" if ext in ALLOWED_VIDEO_EXTENSIONS else "image"
-
-        try:
-            result = cloudinary.uploader.upload(
-                file_storage,
-                folder=folder,
-                resource_type=resource_type,
-                unique_filename=True,
-                overwrite=False,
-            )
-            return (result.get("secure_url"), resource_type)
-        except Exception:
-            return (None, None)
-
-    def save_upload(file_storage, folder: str, allowed_set=None):
-        """
-        Retorna (url, file_type). Se allowed_set vier, valida por ele também.
-        """
-        if not file_storage or not getattr(file_storage, "filename", ""):
-            return (None, None)
-
-        filename = secure_filename(file_storage.filename)
-        if "." not in filename:
-            return (None, None)
-
-        ext = filename.rsplit(".", 1)[1].lower()
-
-        if allowed_set is not None and ext not in allowed_set:
-            return (None, None)
-
-        if ext not in ALLOWED_EXTENSIONS:
-            return (None, None)
-
-        resource_type = "video" if ext in ALLOWED_VIDEO_EXTENSIONS else "image"
-
-        try:
-            result = cloudinary.uploader.upload(
-                file_storage,
-                folder=folder,
-                resource_type=resource_type,
-                unique_filename=True,
-                overwrite=False,
-            )
-            return (result.get("secure_url"), resource_type)
-        except Exception:
-            return (None, None)
-
-    # =========================
-    # HELPERS
-    # =========================
-    def admin_key_ok():
-        key = request.headers.get("X-ADMIN-KEY") or request.args.get("key") or request.form.get("key")
-        return key == os.environ.get("ADMIN_KEY", "123")
-
-    def to_embed_url(url: str) -> str:
-        url = (url or "").strip()
-        if not url:
-            return ""
-
-        m = re.search(r"(youtube\.com/watch\?v=|youtu\.be/)([A-Za-z0-9_\-]+)", url)
-        if m:
-            vid = m.group(2)
-            return f"https://www.youtube.com/embed/{vid}"
-
-        m = re.search(r"vimeo\.com/(\d+)", url)
-        if m:
-            vid = m.group(1)
-            return f"https://player.vimeo.com/video/{vid}"
-
-        return url
-
-    def parse_github_repo(url: str):
-        url = (url or "").strip().replace(".git", "")
-        m = re.search(r"github\.com/([^/]+)/([^/]+)", url)
-        if not m:
-            return None
-        return (m.group(1), m.group(2))
-
-    def github_headers(token: str | None):
-        headers = {"Accept": "application/vnd.github+json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
-        return headers
-
-    def fetch_repo_info(repo_url: str, token: str | None = None):
-        parsed = parse_github_repo(repo_url)
-        if not parsed:
-            return (None, "URL inválida. Ex: https://github.com/usuario/repo")
-
-        owner, repo = parsed
-        api_url = f"https://api.github.com/repos/{owner}/{repo}"
-
-        r = requests.get(api_url, headers=github_headers(token), timeout=12)
-
-        if r.status_code == 403:
-            remaining = r.headers.get("X-RateLimit-Remaining")
-            reset = r.headers.get("X-RateLimit-Reset")
+    if paths_by_vehicle:
+        for p in pts:
+            v = p["vehicle_id"]
+            line = paths_by_vehicle.get(v)
+            if not line or len(line) < 2:
+                continue
             try:
-                msg = r.json().get("message", "403 no GitHub")
+                d = _point_to_linestring_km((p["lat"], p["lon"]), line)
+                if d > buffer_km:
+                    ev.append({
+                        "type": "off_route",
+                        "vehicle_id": v,
+                        "ts": p["ts"],
+                        "lat": p["lat"], "lon": p["lon"],
+                        "distance_km": round(d, 3)
+                    })
             except Exception:
-                msg = "403 no GitHub"
+                continue
 
-            if remaining == "0":
-                return (None, f"GitHub rate limit estourou (403). Configure GITHUB_TOKEN. msg={msg} reset={reset}")
-            return (None, f"GitHub respondeu 403: {msg}")
+    return jsonify(ev)
 
-        if r.status_code != 200:
-            try:
-                msg = r.json().get("message", "")
-            except Exception:
-                msg = ""
-            return (None, f"GitHub respondeu {r.status_code}. {msg}")
+@app.get("/api/telemetry/series")
+@login_required
+def api_telemetry_series():
+    hours = int(request.args.get("hours", 6))
+    vid = (request.args.get("vehicle_id") or "").strip()
+    if not vid:
+        return jsonify([])
 
-        data = r.json()
-        return ({
-            "repo_name": data.get("name", "") or "",
-            "repo_description": data.get("description", "") or "",
-            "repo_language": data.get("language", "") or "",
-            "repo_stars": int(data.get("stargazers_count", 0) or 0),
-            "repo_html_url": data.get("html_url", "") or "",
-        }, None)
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT timestamp AS ts, COALESCE(speed, 0) AS speed
+        FROM telemetry
+        WHERE vehicle_id = ?
+          AND timestamp >= {_sql_hours_ago(hours)}
+        ORDER BY ts
+        LIMIT 20000
+    """, [vid]).fetchall()
 
-    def fetch_repo_tree(owner, repo, token=None):
-        api = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
-        r = requests.get(api, headers=github_headers(token), timeout=15)
-        if r.status_code != 200:
-            return []
-        return r.json().get("tree", [])
+    out = []
+    for ts, spd in rows:
+        try:
+            out.append({"t": str(ts), "speed": float(spd)})
+        except Exception:
+            continue
+    return jsonify(out)
 
-    def fetch_repo_file(owner, repo, path, token=None):
-        api = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-        r = requests.get(api, headers=github_headers(token), timeout=15)
-        if r.status_code != 200:
-            return None
-        content = r.json().get("content", "")
-        return base64.b64decode(content).decode("utf-8", errors="ignore")
+@app.get("/api/telemetry/export")
+@login_required
+def export_telemetry():
+    fmt = (request.args.get("fmt") or "csv").lower()
+    hours = int(request.args.get("hours") or 6)
+    vehicle_id = request.args.get("vehicle_id") or None
 
-    def current_user():
-        uid = session.get("user_id")
-        if not uid:
-            return None
-        return User.query.get(uid)
+    pts = _fetch_points(hours, vehicle_id)
+    evs = _detect_events(pts)
 
-    def login_required(fn):
-        from functools import wraps
+    if fmt == "csv":
+        return _export_csv(pts, evs, hours, vehicle_id)
+    elif fmt == "pdf":
+        try:
+            return _export_pdf(pts, evs, hours, vehicle_id)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"PDF indisponível ({e}). Instale 'reportlab' ou exporte CSV."}), 501
+    else:
+        return jsonify({"ok": False, "error": "Formato inválido. Use csv ou pdf."}), 400
 
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            if not session.get("user_id"):
-                return redirect(url_for("login"))
-            return fn(*args, **kwargs)
+def _export_csv(pts, evs, hours, vehicle_id):
+    buf = StringIO()
+    w = csv.writer(buf)
+    w.writerow(["# OptiFleet export"])
+    w.writerow([f"Filtro horas: {hours}", f"Veículo: {vehicle_id or 'todos'}"])
+    w.writerow([])
 
-        return wrapper
+    w.writerow(["TRILHA"])
+    w.writerow(["vehicle_id","ts","lat","lon","speed_kmh","bearing"])
+    for p in pts:
+        w.writerow([
+            p.get("vehicle_id",""), p.get("ts",""),
+            p.get("lat",""), p.get("lon",""),
+            p.get("speed",""), p.get("bearing",""),
+        ])
+    w.writerow([])
 
-    # =========================
-    # DB INIT + SEED
-    # =========================
-    def seed_if_empty():
-        # Dev seed
-        if Dev.query.count() == 0:
-            vitor = Dev(
-                username="vitorneto43",
-                name="Vitor Veiga",
-                bio="Builder of apps, systems and AI. Shipping fast.",
-                readme="Deploy Infinity.tech is a dev-first network focused on real proof: live demos + repos + portfolio.",
-                github="https://github.com/vitorneto43",
+    w.writerow(["EVENTOS"])
+    w.writerow(["vehicle_id","type","ts","lat","lon","minutes","value","delta_deg"])
+    for e in evs:
+        w.writerow([
+            e.get("vehicle_id",""), e.get("type",""), e.get("ts",""),
+            e.get("lat",""), e.get("lon",""),
+            e.get("minutes",""), e.get("value",""), e.get("delta_deg",""),
+        ])
+
+    data = buf.getvalue().encode("utf-8-sig")
+    bio = BytesIO(data)
+    fname = f"optifleet_{vehicle_id or 'all'}_{hours}h.csv"
+    return send_file(bio, mimetype="text/csv", as_attachment=True, download_name=fname)
+
+def _export_pdf(pts, evs, hours, vehicle_id):
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+
+    bio = BytesIO()
+    c = canvas.Canvas(bio, pagesize=landscape(A4))
+    width, height = landscape(A4)
+
+    title = f"OptiFleet — Exportação ({hours}h, veículo: {vehicle_id or 'todos'})"
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, height-40, title)
+
+    def draw_table(x, y, rows, col_widths):
+        line_h = 14
+        cur_y = y
+        for i, row in enumerate(rows):
+            cur_x = x
+            c.setFont("Helvetica-Bold" if i == 0 else "Helvetica", 9)
+            for col, w in zip(row, col_widths):
+                txt = str(col)[:80]
+                c.drawString(cur_x+2, cur_y, txt)
+                cur_x += w
+            cur_y -= line_h
+            if cur_y < 40:
+                c.showPage()
+                c.setFont("Helvetica", 9)
+                cur_y = height - 60
+        return cur_y
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, height-70, "Trilha (amostra)")
+    rows1 = [["vehicle_id","ts","lat","lon","speed_kmh","bearing"]]
+    for p in pts[:40]:
+        rows1.append([
+            p.get("vehicle_id",""), p.get("ts",""),
+            round(p.get("lat",0), 6), round(p.get("lon",0), 6),
+            p.get("speed",""), p.get("bearing",""),
+        ])
+    y = draw_table(40, height-90, rows1, [90,140,90,90,80,80])
+
+    if y < 160:
+        c.showPage()
+        y = height - 60
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "Eventos (amostra)")
+    rows2 = [["vehicle_id","type","ts","lat","lon","minutes","value","delta_deg"]]
+    for e in evs[:40]:
+        rows2.append([
+            e.get("vehicle_id",""), e.get("type",""), e.get("ts",""),
+            round(e.get("lat",0), 6), round(e.get("lon",0), 6),
+            e.get("minutes",""), e.get("value",""), e.get("delta_deg",""),
+        ])
+    draw_table(40, y-20, rows2, [90,80,140,90,90,70,70,70])
+
+    c.showPage()
+    c.save()
+    bio.seek(0)
+    fname = f"optifleet_{vehicle_id or 'all'}_{hours}h.pdf"
+    return send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fname)
+
+# -----------------------------------------------------------------------------
+# Subscribe shim
+# -----------------------------------------------------------------------------
+@app.get("/subscribe")
+@login_required
+def subscribe_shim():
+    qs = request.query_string.decode()
+    return redirect(f"/billing/go?{qs}")
+
+# -----------------------------------------------------------------------------
+# Otimização / Roteirização
+# -----------------------------------------------------------------------------
+def parse_request(payload) -> OptimizeRequest:
+    depot = payload["depot"]
+
+    # =============== DEPÓSITO ==================
+    d_lat = depot.get("lat")
+    d_lon = depot.get("lon")
+    depot_addr = (depot.get("address") or depot.get("endereco") or "").strip()
+
+    if not d_lat or not d_lon:
+        if not depot_addr:
+            raise ValueError("Depósito sem coordenadas e sem endereço.")
+        geo = rp.geocode(depot_addr)
+        if not geo:
+            raise ValueError(f"Não foi possível geocodificar o depósito: {depot_addr}")
+        d_lat, d_lon = geo
+
+    d = Depot(
+        loc=Location(float(d_lat), float(d_lon)),
+        window=TimeWindow(
+            hhmm_to_minutes(depot.get("start_window", "00:00")),
+            hhmm_to_minutes(depot.get("end_window", "23:59")),
+        ),
+    )
+
+    # =============== VEÍCULOS ==================
+    vehicles = []
+    for v in payload["vehicles"]:
+        vehicles.append(
+            Vehicle(
+                id=v["id"],
+                capacity=int(v.get("capacity", 999999)),
+                start_min=hhmm_to_minutes(v.get("start_time", "00:00")),
+                end_min=hhmm_to_minutes(v.get("end_time", "23:59")),
+                speed_factor=float(v.get("speed_factor", 1.0)),
             )
-            db.session.add(vitor)
-            db.session.commit()
-
-    with app.app_context():
-        db.create_all()
-        seed_if_empty()
-
-    # =========================
-    # HOME
-    # =========================
-    @app.get("/")
-    def home():
-        deploys = Deploy.query.order_by(Deploy.created_at.desc()).limit(8).all()
-        portfolios = Portfolio.query.order_by(Portfolio.created_at.desc()).limit(8).all()
-        return render_template("home.html", deploys=deploys, portfolios=portfolios)
-
-    # =========================
-    # AUTH
-    # =========================
-    @app.route("/register", methods=["GET", "POST"])
-    def register():
-        if request.method == "POST":
-            name = request.form.get("name", "").strip()
-            email = request.form.get("email", "").strip().lower()
-            password = request.form.get("password", "")
-            avatar = request.files.get("avatar")
-
-            if not name or not email or not password:
-                flash("Preencha nome, e-mail e senha.")
-                return redirect(url_for("register"))
-
-            if User.query.filter_by(email=email).first():
-                flash("Esse e-mail já está cadastrado.")
-                return redirect(url_for("register"))
-
-            avatar_url = None
-            if avatar and avatar.filename:
-                avatar_url, _ = save_upload(avatar, folder="deployinfinity/avatars", allowed_set=ALLOWED_IMAGE_EXTENSIONS)
-                if avatar_url is None:
-                    flash("Avatar inválido. Envie PNG/JPG/JPEG/WEBP/GIF.")
-                    return redirect(url_for("register"))
-
-            u = User(name=name, email=email, avatar_url=avatar_url)
-            u.set_password(password)
-            db.session.add(u)
-            db.session.commit()
-
-            session["user_id"] = u.id
-            flash("Conta criada com sucesso!")
-            return redirect(url_for("profile"))
-
-        return render_template("auth_register.html")
-
-    @app.route("/login", methods=["GET", "POST"])
-    def login():
-        if request.method == "POST":
-            email = request.form.get("email", "").strip().lower()
-            password = request.form.get("password", "")
-
-            u = User.query.filter_by(email=email).first()
-            if not u or not u.check_password(password):
-                flash("E-mail ou senha inválidos.")
-                return redirect(url_for("login"))
-
-            session["user_id"] = u.id
-            flash("Login OK!")
-            return redirect(url_for("profile"))
-
-        return render_template("auth_login.html")
-
-    @app.route("/logout")
-    def logout():
-        session.clear()
-        return redirect(url_for("login"))
-
-    @app.route("/profile")
-    @login_required
-    def profile():
-        u = current_user()
-        return render_template("profile.html", user=u)
-
-    @app.route("/profile/avatar", methods=["POST"])
-    @login_required
-    def update_avatar():
-        u = current_user()
-        avatar = request.files.get("avatar")
-
-        if not avatar or not avatar.filename:
-            flash("Selecione uma imagem.")
-            return redirect(url_for("profile"))
-
-        avatar_url, _ = save_upload(avatar, folder="deployinfinity/avatars", allowed_set=ALLOWED_IMAGE_EXTENSIONS)
-        if avatar_url is None:
-            flash("Avatar inválido. Envie PNG/JPG/JPEG/WEBP/GIF.")
-            return redirect(url_for("profile"))
-
-        u.avatar_url = avatar_url
-        db.session.commit()
-
-        flash("Avatar atualizado!")
-        return redirect(url_for("profile"))
-
-    # =========================
-    # API UPLOAD (IMAGEM/VÍDEO)
-    # =========================
-    @app.route("/api/upload", methods=["POST"])
-    def api_upload():
-        if "file" not in request.files:
-            return jsonify({"ok": False, "error": "Nenhum arquivo enviado (campo 'file')."}), 400
-
-        f = request.files["file"]
-        if not f.filename:
-            return jsonify({"ok": False, "error": "Arquivo sem nome."}), 400
-
-        if not allowed_file(f.filename):
-            return jsonify({"ok": False, "error": "Extensão não permitida."}), 400
-
-        url, ftype = save_upload_cloudinary(f, folder="deployinfinity/uploads")
-        if not url:
-            return jsonify({"ok": False, "error": "Falha no upload para Cloudinary."}), 500
-
-        return jsonify({"ok": True, "url": url, "file_type": ftype})
-
-    # =========================
-    # UPLOAD PAGE (SALVA NO BANCO)
-    # =========================
-    @app.route("/upload", methods=["GET", "POST"])
-    @login_required
-    def upload_media():
-        u = current_user()
-
-        if request.method == "POST":
-            file = request.files.get("file")
-
-            if not file or not file.filename:
-                flash("Selecione um arquivo.")
-                return redirect(url_for("upload_media"))
-
-            url, ftype = save_upload(file, folder="deployinfinity/media")
-            if url is None:
-                flash("Formato inválido. Imagens: png/jpg/jpeg/webp/gif | Vídeos: mp4/webm/mov")
-                return redirect(url_for("upload_media"))
-
-            up = MediaUpload(user_id=u.id, file_url=url, file_type=ftype)
-            db.session.add(up)
-            db.session.commit()
-
-            flash("Upload realizado!")
-            return redirect(url_for("upload_media"))
-
-        uploads = MediaUpload.query.filter_by(user_id=u.id).order_by(MediaUpload.created_at.desc()).all()
-        return render_template("upload_media.html", user=u, uploads=uploads)
-
-    # =========================
-    # PORTFOLIO ADD MEDIA (GALERIA)
-    # =========================
-    @app.route("/portfolio/<int:portfolio_id>/media", methods=["POST"])
-    @login_required
-    def portfolio_add_media(portfolio_id):
-        u = current_user()
-        portfolio = Portfolio.query.get_or_404(portfolio_id)
-
-        if hasattr(portfolio, "user_id") and portfolio.user_id and portfolio.user_id != u.id:
-            abort(403)
-
-        file = request.files.get("file")
-        if not file or not file.filename:
-            flash("Selecione um arquivo.")
-            return redirect(url_for("portfolio_detail", portfolio_id=portfolio_id))
-
-        url, ftype = save_upload(file, folder="deployinfinity/portfolio_media")
-        if url is None:
-            flash("Formato inválido. Imagens: png/jpg/jpeg/webp/gif | Vídeos: mp4/webm/mov")
-            return redirect(url_for("portfolio_detail", portfolio_id=portfolio_id))
-
-        pm = PortfolioMedia(
-            portfolio_id=portfolio.id,
-            file_url=url,
-            file_type=ftype,
         )
-        db.session.add(pm)
-        db.session.commit()
 
-        flash("Mídia adicionada ao portfólio!")
-        return redirect(url_for("portfolio_detail", portfolio_id=portfolio_id))
+    # =============== PARADAS ==================
+    stops = []
+    for idx, s in enumerate(payload["stops"], start=1):
 
-    # =========================
-    # GITHUB IMPORT
-    # =========================
-    @app.route("/github/import", methods=["GET", "POST"])
-    @login_required
-    def import_github_repo():
-        u = current_user()
+        # Aceitar address OU endereco
+        s_addr = (s.get("address") or s.get("endereco") or "").strip()
+        s_lat = s.get("lat")
+        s_lon = s.get("lon")
 
-        if request.method == "POST":
-            repo_url = request.form.get("repo_url", "").strip()
-            gh_token = os.environ.get("GITHUB_TOKEN", "").strip() or None
+        # Caso 1: veio lat/lon válidos → usa direto
+        if s_lat not in (None, "", " ") and s_lon not in (None, "", " "):
+            try:
+                lat = float(s_lat)
+                lon = float(s_lon)
+            except:
+                lat = None
+                lon = None
+        else:
+            lat = None
+            lon = None
 
-            info, err = fetch_repo_info(repo_url, gh_token)
-            if err:
-                flash(err)
-                return redirect(url_for("import_github_repo"))
-
-            # ⚠️ Atenção: seu Repo usa dev_id (Dev), mas você loga como User.
-            # Solução rápida: usar o primeiro Dev como dono (ou crie um campo user_id no Repo).
-            dev = Dev.query.first()
-            if not dev:
-                flash("Nenhum Dev cadastrado.")
-                return redirect(url_for("import_github_repo"))
-
-            repo = Repo(
-                dev_id=dev.id,
-                title=info["repo_name"],
-                url=repo_url,
-                description=info["repo_description"],
-                stack=info["repo_language"],
-                image_url="",
-                is_public=True,
-                reported=False,
-            )
-
-            db.session.add(repo)
-            db.session.commit()
-
-            flash("Repositório importado com sucesso!")
-            return redirect(url_for("repo_detail", repo_id=repo.id))
-
-        return render_template("github_import.html")
-
-    # =========================
-    # LISTAGENS
-    # =========================
-    @app.get("/repos")
-    @login_required
-    def repos():
-        q = request.args.get("q", "").strip()
-        query = Repo.query.filter_by(is_public=True, reported=False)
-        if q:
-            like = f"%{q}%"
-            query = query.filter(
-                (Repo.title.ilike(like))
-                | (Repo.description.ilike(like))
-                | (Repo.tags.ilike(like))
-                | (Repo.stack.ilike(like))
-            )
-        repos_list = query.order_by(Repo.created_at.desc()).all()
-        return render_template("repos.html", repos=repos_list, q=q)
-
-    @app.route("/repo/<int:repo_id>")
-    @login_required
-    def repo_detail(repo_id):
-        repo = Repo.query.get_or_404(repo_id)
-
-        parsed = parse_github_repo(repo.url)
-        if not parsed:
-            flash("URL do GitHub inválida nesse Repo cadastrado.")
-            return redirect(url_for("repos"))
-
-        owner, name = parsed
-        tree = fetch_repo_tree(owner, name, os.environ.get("GITHUB_TOKEN"))
-
-        return render_template("repo_detail.html", repo=repo, tree=tree)
-
-    @app.route("/repo/<int:repo_id>/file")
-    @login_required
-    def repo_file(repo_id):
-        path = request.args.get("path")
-        repo = Repo.query.get_or_404(repo_id)
-
-        parsed = parse_github_repo(repo.url)
-        if not parsed:
-            flash("URL do GitHub inválida nesse Repo cadastrado.")
-            return redirect(url_for("repos"))
-
-        if not path:
-            flash("Informe o path do arquivo.")
-            return redirect(url_for("repo_detail", repo_id=repo_id))
-
-        owner, name = parsed
-        content = fetch_repo_file(owner, name, path, os.environ.get("GITHUB_TOKEN"))
-
-        return render_template("repo_file.html", repo=repo, path=path, content=content)
-
-    @app.get("/deploys")
-    @login_required
-    def deploys():
-        q = request.args.get("q", "").strip()
-        query = Deploy.query.filter_by(is_public=True, reported=False)
-        if q:
-            like = f"%{q}%"
-            query = query.filter(
-                (Deploy.title.ilike(like))
-                | (Deploy.stack.ilike(like))
-                | (Deploy.status.ilike(like))
-            )
-        deploys_list = query.order_by(Deploy.created_at.desc()).all()
-        return render_template("deploys.html", deploys=deploys_list, q=q)
-
-    @app.get("/portfolio")
-    @login_required
-    def portfolio():
-        q = request.args.get("q", "").strip()
-        query = Portfolio.query
-        if q:
-            like = f"%{q}%"
-            query = query.filter(
-                or_(
-                    Portfolio.title.ilike(like),
-                    Portfolio.description.ilike(like),
-                    Portfolio.category.ilike(like),
+        # Caso 2: veio endereço → geocodifica
+        if (lat is None or lon is None):
+            if not s_addr:
+                raise ValueError(
+                    f"Parada {s.get('id', f'S{idx}')} sem lat/lon e sem endereço."
                 )
+            geo = rp.geocode(s_addr)
+            if not geo:
+                raise ValueError(
+                    f"Não foi possível geocodificar a parada "
+                    f"{s.get('id', f'S{idx}')}: {s_addr}"
+                )
+            lat, lon = geo
+
+        tw = None
+        if s.get("tw_start") and s.get("tw_end"):
+            tw = TimeWindow(
+                hhmm_to_minutes(s["tw_start"]),
+                hhmm_to_minutes(s["tw_end"]),
             )
-        items = query.order_by(Portfolio.created_at.desc()).all()
-        return render_template("portfolio.html", items=items, q=q)
 
-    @app.get("/portfolio/<int:portfolio_id>")
-    @login_required
-    def portfolio_detail(portfolio_id):
-        portfolio = Portfolio.query.get_or_404(portfolio_id)
-        medias = sorted(getattr(portfolio, "medias", []), key=lambda m: getattr(m, "sort_order", 0))
-        return render_template("portfolio_detail.html", portfolio=portfolio, medias=medias)
-
-    @app.route("/deploy/<int:deploy_id>")
-    @login_required
-    def deploy_detail(deploy_id):
-        deploy = Deploy.query.get_or_404(deploy_id)
-        return render_template("deploy_detail.html", deploy=deploy)
-
-    # =========================
-    # PERFIL DO DEV
-    # =========================
-    @app.route("/devs")
-    @login_required
-    def devs():
-        devs_list = Dev.query.order_by(Dev.created_at.desc()).all()
-        return render_template("devs.html", devs=devs_list)
-
-    @app.get("/dev/<username>")
-    @login_required
-    def dev_profile(username):
-        dev = Dev.query.filter_by(username=username).first_or_404()
-        repos_ = Repo.query.filter_by(dev_id=dev.id, is_public=True, reported=False).order_by(Repo.created_at.desc()).all()
-        deploys_ = Deploy.query.filter_by(dev_id=dev.id, is_public=True, reported=False).order_by(Deploy.created_at.desc()).all()
-        items_ = Portfolio.query.filter_by(dev_id=dev.id, is_public=True, reported=False).order_by(Portfolio.created_at.desc()).all()
-        return render_template("dev_profile.html", dev=dev, repos=repos_, deploys=deploys_, items=items_)
-
-    # =========================
-    # FORMS (NEW)
-    # =========================
-    @app.get("/new/repo")
-    @login_required
-    def new_repo_form():
-        devs_list = Dev.query.order_by(Dev.created_at.desc()).all()
-        return render_template("form_repo.html", devs=devs_list)
-
-    @app.post("/new/repo")
-    @login_required
-    def new_repo():
-        if not admin_key_ok():
-            abort(403)
-
-        repo = Repo(
-            dev_id=int(request.form["dev_id"]),
-            title=request.form["title"].strip(),
-            url=request.form["url"].strip(),
-            description=request.form.get("description", "").strip(),
-            stack=request.form.get("stack", "").strip(),
-            tags=request.form.get("tags", "").strip(),
-            image_url=request.form.get("image_url", "").strip(),
-            is_public=True,
-            reported=False,
-        )
-        db.session.add(repo)
-        db.session.commit()
-        flash("Repo cadastrado!", "ok")
-        return redirect(url_for("repos"))
-
-    @app.get("/new/deploy")
-    @login_required
-    def new_deploy_form():
-        devs_list = Dev.query.order_by(Dev.created_at.desc()).all()
-        return render_template("form_deploy.html", devs=devs_list)
-
-    @app.post("/new/deploy")
-    @login_required
-    def new_deploy():
-        repo_url = request.form.get("repo_url", "").strip()
-        gh_token = os.environ.get("GITHUB_TOKEN")
-        info = None
-        if repo_url:
-            info, _err = fetch_repo_info(repo_url, gh_token)
-
-        deploy = Deploy(
-            dev_id=int(request.form["dev_id"]),
-            title=request.form["title"].strip(),
-            deploy_url=request.form["deploy_url"].strip(),
-            repo_url=repo_url,
-            status=request.form.get("status", "online").strip(),
-            stack=request.form.get("stack", "").strip(),
-            image_url=request.form.get("image_url", "").strip(),
-            repo_name=(info["repo_name"] if info else ""),
-            repo_description=(info["repo_description"] if info else ""),
-            repo_language=(info["repo_language"] if info else ""),
-            repo_stars=(info["repo_stars"] if info else 0),
-            repo_html_url=(info["repo_html_url"] if info else ""),
-        )
-        db.session.add(deploy)
-        db.session.commit()
-        flash("Deploy cadastrado!", "ok")
-        return redirect(url_for("deploys"))
-
-    @app.get("/new/portfolio")
-    @login_required
-    def new_portfolio_form():
-        devs_list = Dev.query.order_by(Dev.created_at.desc()).all()
-        return render_template("form_portfolio.html", devs=devs_list)
-
-    @app.post("/new/portfolio")
-    @login_required
-    def new_portfolio():
-        dev_id = int(request.form["dev_id"])
-        title = request.form["title"].strip()
-
-        portfolio_ = Portfolio(
-            dev_id=dev_id,
-            title=title,
-            category=request.form.get("category", "").strip(),
-            description=request.form.get("description", "").strip(),
-            repo_url=request.form.get("repo_url", "").strip(),
-            demo_url=request.form.get("demo_url", "").strip(),
-            cover_image_url=request.form.get("cover_image_url", "").strip(),
-            is_public=True,
-            reported=False,
+        stops.append(
+            Stop(
+                id=s.get("id") or f"S{idx}",
+                loc=Location(lat, lon),
+                demand=int(s.get("demand", 0)),
+                service_min=int(s.get("service_min", 0)),
+                window=tw,
+            )
         )
 
-        db.session.add(portfolio_)
-        db.session.commit()
+    return OptimizeRequest(
+        depot=d,
+        vehicles=vehicles,
+        stops=stops,
+        objective=payload.get("objective", "min_cost"),
+        include_tolls=bool(payload.get("include_tolls", True)),
+    )
 
-        flash("Portfólio cadastrado!", "ok")
-        return redirect(url_for("portfolio_detail", portfolio_id=portfolio_.id))
 
-    # =========================
-    # API GITHUB (diagnóstico)
-    # =========================
-    @app.get("/api/github/repo")
-    @login_required
-    def api_github_repo():
-        repo_url = request.args.get("url", "").strip()
-        parsed = parse_github_repo(repo_url)
-        if not parsed:
-            return jsonify({"error": "URL inválida do GitHub. Ex: https://github.com/usuario/repo"}), 400
+@app.post("/optimize")
+@login_required
+def optimize():
+    raw = request.get_json(force=True) or {}
 
-        owner, repo = parsed
-        api_url = f"https://api.github.com/repos/{owner}/{repo}"
+    # ==========================
+    # 1) Lê max_days do payload
+    # ==========================
+    depot_raw = raw.get("depot") or {}
+    try:
+        max_days = int(depot_raw.get("max_days") or 1)
+    except (TypeError, ValueError):
+        max_days = 1
+    if max_days < 1:
+        max_days = 1
 
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
-        headers = github_headers(token if token else None)
+    # quantos minutos extras além do primeiro dia
+    extra_minutes = (max_days - 1) * 24 * 60
 
-        r = requests.get(api_url, headers=headers, timeout=12)
-        if r.status_code == 403:
-            remaining = r.headers.get("X-RateLimit-Remaining")
-            if remaining == "0":
-                return jsonify({"error": "Rate limit do GitHub estourou no servidor. Configure GITHUB_TOKEN."}), 403
-            return jsonify({"error": "403 Forbidden. Token faltando/inválido ou sem permissão."}), 403
+    # ==========================
+    # 2) Parse da requisição
+    # ==========================
+    try:
+        req = parse_request(raw)
+    except Exception as e:
+        return jsonify({"status": "bad_request", "message": str(e)}), 400
 
-        if r.status_code != 200:
-            return jsonify({"error": f"GitHub respondeu {r.status_code}."}), 400
+    # ==========================
+    # 3) Matriz de tempos/distâncias
+    # ==========================
+    all_points = [req.depot] + req.stops
+    try:
+        m = rp.travel_matrix(all_points)
+    except Exception as e:
+        return jsonify({"status": "provider_error", "message": f"Erro no provedor de rotas: {e}"}), 500
 
-        j = r.json()
-        return jsonify({
-            "name": j.get("name"),
-            "description": j.get("description") or "",
-            "stars": j.get("stargazers_count", 0),
-            "language": j.get("language") or "",
-            "html_url": j.get("html_url") or repo_url,
+    n_all = len(all_points)
+    time_m_all = [[0.0] * n_all for _ in range(n_all)]
+    dist_m_all = [[0.0] * n_all for _ in range(n_all)]
+    for i in range(n_all):
+        for j in range(n_all):
+            cell = m[(i, j)]
+            time_m_all[i][j] = cell["minutes"]
+            dist_m_all[i][j] = cell["km"]
+
+    # ==========================
+    # 4) Mapeia stops → veículos (se tiver assignment)
+    # ==========================
+    raw_stops = raw.get("stops", [])
+    id_to_vehicle = {rs.get("id"): rs.get("vehicle") for rs in raw_stops if rs.get("id")}
+    stops_by_vehicle: dict[str, list[Stop]] = {}
+    has_assignment = False
+    for s in req.stops:
+        vcode = id_to_vehicle.get(s.id)
+        if vcode:
+            has_assignment = True
+            setattr(s, "assigned_vehicle", vcode)
+            stops_by_vehicle.setdefault(vcode, []).append(s)
+
+    results = []
+    total_time = 0.0
+    total_dist = 0.0
+
+    # ==========================
+    # 5) Estende janelas dos veículos com base em max_days
+    # ==========================
+    veh_by_id = {v.id: v for v in req.vehicles}
+    extended_veh = {}
+    for v in req.vehicles:
+        extended_veh[v.id] = {
+            "id": v.id,
+            "capacity": v.capacity,
+            "start_min": v.start_min,
+            "end_min": v.end_min + extra_minutes,  # 👈 estica em N dias
+        }
+
+    # ==========================
+    # 6) Função helper: recorta matriz e chama solver
+    # ==========================
+    def slice_and_solve(stops_subset, vehicles_subset):
+        points = [req.depot] + stops_subset
+        idx_map = [0] + [1 + req.stops.index(s) for s in stops_subset]
+        n = len(points)
+
+        tmat = [[0.0] * n for _ in range(n)]
+        dmat = [[0.0] * n for _ in range(n)]
+        for a, ia in enumerate(idx_map):
+            for b, ib in enumerate(idx_map):
+                tmat[a][b] = time_m_all[ia][ib]
+                dmat[a][b] = dist_m_all[ia][ib]
+
+        depot_index = 0
+        service_times = [0] + [s.service_min for s in stops_subset]
+        demands = [0] + [s.demand for s in stops_subset]
+
+        # 🔥 AQUI: janela do depósito e paradas esticadas para max_days
+        dep_start = req.depot.window.start_min
+        dep_end = req.depot.window.end_min + extra_minutes
+        time_windows = [(dep_start, dep_end)]
+        for s in stops_subset:
+            if s.window:
+                start = s.window.start_min
+                end = s.window.end_min + extra_minutes
+            else:
+                start = dep_start
+                end = dep_end
+            time_windows.append((start, end))
+
+        return solve_vrptw(
+            time_matrix_min=tmat,
+            dist_matrix_km=dmat,
+            depot_index=depot_index,
+            service_times=service_times,
+            demands=demands,
+            time_windows=time_windows,
+            vehicles=vehicles_subset,
+            objective=req.objective,
+        )
+
+    # ==========================
+    # 7) Se não tiver vehicle fixo, distribui round-robin
+    # ==========================
+    def rr_partition(stops, vid_list):
+        buckets = {vid: [] for vid in vid_list}
+        if not stops:
+            return buckets
+        for i, s in enumerate(stops):
+            buckets[vid_list[i % len(vid_list)]].append(s)
+        return buckets
+
+    FORCE_PER_VEHICLE = True
+    if FORCE_PER_VEHICLE:
+        if not has_assignment:
+            veh_ids = [v.id for v in req.vehicles]
+            stops_by_vehicle_local = rr_partition(req.stops, veh_ids)
+        else:
+            stops_by_vehicle_local = stops_by_vehicle
+
+        for vid, v in veh_by_id.items():
+            subset = stops_by_vehicle_local.get(vid, [])
+            if subset:
+                veh_def = [extended_veh[v.id]]  # 👈 usa veículo estendido
+                r = slice_and_solve(subset, veh_def)
+                if r.get("status") != "ok":
+                    # aqui vem o "infeasible" que você viu
+                    return jsonify(r), 400
+
+                for route in r["routes"]:
+                    route["vehicle_id"] = v.id
+                    abs_nodes = []
+                    for n in route.get("nodes", []):
+                        abs_nodes.append(0 if n == 0 else (1 + req.stops.index(subset[n - 1])))
+                    route["nodes_abs"] = abs_nodes
+                    route["nodes"] = route.get("nodes_abs", route.get("nodes", []))
+                    results.append(route)
+                    total_time += route["time_min"]
+                    total_dist += route["dist_km"]
+            else:
+                # veículo sem paradas
+                results.append({
+                    "vehicle_id": v.id,
+                    "nodes": [0, 0],
+                    "nodes_abs": [0, 0],
+                    "time_min": 0.0,
+                    "dist_km": 0.0
+                })
+    else:
+        if has_assignment:
+            for vcode, subset in stops_by_vehicle.items():
+                v = veh_by_id.get(vcode)
+                if not v:
+                    return jsonify({"status": "bad_request", "message": f"Veículo '{vcode}' não existe."}), 400
+                veh_def = [extended_veh[v.id]]
+                r = slice_and_solve(subset, veh_def)
+                if r.get("status") != "ok":
+                    return jsonify(r), 400
+                for route in r["routes"]:
+                    route["vehicle_id"] = v.id
+                    results.append(route)
+                    total_time += route["time_min"]
+                    total_dist += route["dist_km"]
+        else:
+            vehs = list(extended_veh.values())
+            r = slice_and_solve(req.stops, vehs)
+            if r.get("status") != "ok":
+                return jsonify(r), 400
+            results = r["routes"]
+            for route in results:
+                if "nodes_abs" not in route and "nodes" in route:
+                    route["nodes_abs"] = route["nodes"]
+            total_time = r["total_time_min"]
+            total_dist = r["total_dist_km"]
+
+    # ==========================
+    # 8) Manutenção (igual antes)
+    # ==========================
+    telemetry_all = raw.get("telemetry", {})
+    maintenance = []
+    for v in req.vehicles:
+        tel = telemetry_all.get(
+            v.id,
+            {"km_rodados": 20000, "dias_desde_ultima_manutencao": 60, "alertas_obd": 0},
+        )
+        maintenance.append({
+            "vehicle_id": v.id,
+            "failure_risk": predict_failure_risk(tel),
         })
 
-    # =========================
-    # REPORTAR
-    # =========================
-    @app.post("/report/<kind>/<int:item_id>")
-    def report(kind, item_id):
-        model = {"repo": Repo, "deploy": Deploy, "portfolio": Portfolio}.get(kind)
-        if not model:
-            abort(404)
-        item = model.query.get_or_404(item_id)
-        item.reported = True
-        db.session.commit()
-        flash("Report recebido. Obrigado.", "ok")
-        return redirect(request.referrer or url_for("home"))
+    # ==========================
+    # 9) Gera mapa HTML (igual antes)
+    # ==========================
+    ts = int(time.time())
+    filename = f"route_{ts}.html"
 
-    # =========================
-    # GOVERNANÇA
-    # =========================
-    @app.get("/rules")
-    def rules():
-        return render_template("rules.html")
+    MAP_DIR.mkdir(exist_ok=True)
+    map_path = MAP_DIR / filename
+    map_rel = f"/mapfile/{filename}"
 
-    @app.get("/terms")
-    def terms():
-        return render_template("terms.html")
+    PALETTE = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+    ]
+    veh_ids = [v.id for v in req.vehicles]
+    color_by_vehicle = {vid: PALETTE[i % len(PALETTE)] for i, vid in enumerate(veh_ids)}
 
-    @app.get("/privacy")
-    def privacy():
-        return render_template("privacy.html")
+    def _fetch_path(origin_latlon, dest_latlon):
+        class P:
+            def __init__(self, lat, lon):
+                self.lat = lat
+                self.lon = lon
+        o = P(origin_latlon[0], origin_latlon[1])
+        d = P(dest_latlon[0], dest_latlon[1])
+        return rp.leg_polyline(o, d)
 
-    # ✅ AGORA SIM: return app no FINAL
-    return app
+    def _ll(obj):
+        try:
+            return float(obj.loc.lat), float(obj.loc.lon)
+        except Exception:
+            return float(obj.lat), float(obj.lon)
+
+    all_pts = [req.depot] + req.stops
+    vehicle_paths: dict[str, list[list[float]]] = {}
+    for route in results:
+        vid = route.get("vehicle_id", "V?")
+        nodes = route.get("nodes_abs") or route.get("nodes") or []
+        if len(nodes) < 2:
+            continue
+
+        full_coords: list[list[float]] = []
+        for a, b in zip(nodes[:-1], nodes[1:]):
+            o_lat, o_lon = _ll(all_pts[a])
+            d_lat, d_lon = _ll(all_pts[b])
+
+            try:
+                path = rp.leg_polyline(
+                    type("P", (), {"lat": o_lat, "lon": o_lon})(),
+                    type("P", (), {"lat": d_lat, "lon": d_lon})(),
+                )
+                leg_coords = _coerce_path_to_coords(path) or []
+            except Exception:
+                leg_coords = []
+
+            if not leg_coords:
+                leg_coords = [[o_lat, o_lon], [d_lat, d_lon]]
+
+            if full_coords and leg_coords and full_coords[-1] == leg_coords[0]:
+                full_coords.extend(leg_coords[1:])
+            else:
+                full_coords.extend(leg_coords)
+
+        if full_coords:
+            vehicle_paths[vid] = full_coords
+
+    map_ok = True
+    try:
+        build_map(
+            [req.depot] + req.stops,
+            results,
+            str(map_path),
+            fetch_path=_fetch_path,
+            color_by_vehicle=color_by_vehicle,
+            legend_title="Rotas por veículo",
+        )
+    except Exception as e:
+        print("[MAP] Falha ao gerar mapa:", e)
+        map_ok = False
+
+    # ==========================
+    # 10) Salva last_plans
+    # ==========================
+    uid = int(current_user.id)
+    with get_conn() as con:
+        con.execute("DELETE FROM last_plans WHERE user_id = ?", [uid])
+        con.execute(
+            """
+            INSERT INTO last_plans (user_id, created_at, req_json, routes_json, map_url, path_json)
+            VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+            """,
+            [
+                uid,
+                json.dumps(raw),
+                json.dumps(results),
+                map_rel if map_ok else "",
+                json.dumps(vehicle_paths),
+            ],
+        )
+
+    return jsonify({
+        "status": "ok",
+        "ok": True,
+        "routes": results,
+        "total_time_min": total_time,
+        "total_dist_km": total_dist,
+        "maintenance": maintenance,
+        "map_url": map_rel if map_ok else "",
+    })
 
 
-app = create_app()
 
+# ---------------------------------------------------------------------
+# Último mapa otimizado por cliente (usado no dashboard)
+# ---------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------
+# Último mapa otimizado por cliente (usado no dashboard)
+# ---------------------------------------------------------------------
+
+
+@app.post("/api/optimize")
+@login_required
+def api_optimize():
+    """
+    Alias para o mesmo fluxo de otimização usado em /optimize.
+    O frontend pode chamar /api/optimize com o mesmo payload JSON
+    e recebe exatamente a mesma resposta que em POST /optimize.
+    """
+    return optimize()
+
+
+
+
+@app.get("/api/vehicles")
+@login_required
+def api_veiculos():
+    """
+    Retorna lista de veículos do usuário logado.
+    Formato: [{"id": "V1", "name": "Fusca Azul"}, ...]
+    """
+    # Substitua esta lógica pela forma como os veículos são armazenados no seu sistema
+    # Exemplo fictício:
+    uid = int(current_user.id)
+    # Supondo que você tenha uma função que busque os veículos do usuário
+    # Exemplo:
+    # from core.db import get_vehicles_by_user
+    # vehicles = get_vehicles_by_user(uid)
+
+    # Por enquanto, exemplo estático
+    vehicles = [
+        {"id": "V1", "name": "Caminhão 1"},
+        {"id": "V2", "name": "Caminhão 2"},
+        {"id": "V3", "name": "Carro de Entrega"}
+    ]
+    # Idealmente, você deve buscar do banco de dados
+    return jsonify(vehicles)
+
+@app.post("/api/trackers/link")
+@login_required
+def api_trackers_link():
+    """
+    Vincula um rastreador (IMEI + token) a um veículo.
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "error": "Dados ausentes"}), 400
+
+        imei = data.get("imei")
+        secret_token = data.get("secret_token")
+        vehicle_id = data.get("vehicle_id")
+
+        if not imei or not secret_token or not vehicle_id:
+            return jsonify({"ok": False, "error": "IMEI, token ou veículo ausente"}), 400
+
+        # Aqui você deve implementar a lógica de vinculação
+        # Exemplo fictício:
+        # from core.db import vincular_rastreador
+        # vincular_rastreador(imei, secret_token, vehicle_id)
+
+        # Por enquanto, apenas simula sucesso
+        print(f"[link_tracker] IMEI={imei}, Token={secret_token}, Veículo={vehicle_id}")
+        return jsonify({"ok": True, "message": "Rastreador vinculado com sucesso!"})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/mapfile/<path:filename>")
+@login_required   # se quiser proteger o mapa
+def serve_mapfile(filename):
+    """
+    Serve os arquivos HTML de rota gerados pelo solver.
+    Ex: /mapfile/route_1763037995.html
+    """
+    filepath = MAP_DIR / filename
+    if not filepath.exists():
+        return "Mapa não encontrado", 404
+    return send_file(str(filepath), mimetype="text/html")
+
+import glob
+
+@app.route("/api/optimize/last_map", methods=["GET"])
+def api_optimize_last_map():
+    """
+    Retorna a URL do último mapa de rota gerado.
+    Usado pelo front quando ele quer reaproveitar o último resultado.
+    """
+    # Busca arquivos route_*.html em MAP_DIR
+    pattern = str(MAP_DIR / "route_*.html")
+    files = glob.glob(pattern)
+
+    if not files:
+        return jsonify({"ok": False, "error": "Nenhum mapa gerado ainda."}), 404
+
+    # Pega o mais recente pelo mtime
+    latest = max(files, key=os.path.getmtime)
+    filename = os.path.basename(latest)
+
+    map_url = url_for("serve_mapfile", filename=filename, _external=False)
+    return jsonify({"ok": True, "map_url": map_url})
+
+
+
+# -----------------------------------------------------------------------------
+# Blueprints
+# -----------------------------------------------------------------------------
+app.register_blueprint(bp_auth)
+app.register_blueprint(bp_fleet)
+app.register_blueprint(bp_tele)
+app.register_blueprint(bp_reroute)
+app.register_blueprint(bp_notify)
+app.register_blueprint(bp_vendor)
+app.register_blueprint(bp_billing)
+app.register_blueprint(bp_trial)
+app.register_blueprint(bp_contact)
+app.register_blueprint(bp_checkout)
+app.register_blueprint(bp_demo)
+app.register_blueprint(bp_account)
+app.register_blueprint(bp_payments)
+app.register_blueprint(bp_webhooks)
+
+# -----------------------------------------------------------------------------
+# Run (dev)
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Run (compatível com Render)
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Run (compatível com Render)
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    # NO RENDER: use a porta da variável de ambiente PORT
+    port = int(os.environ.get("PORT", 10000))  # Render usa PORT, fallback 10000
+    # NO RENDER: sempre use 0.0.0.0
+    host = "0.0.0.0"
+
+    print(f"🚀 Servidor OptiFleet iniciando em http://{host}:{port}")
+    app.run(host=host, port=port, debug=False)
+
+
+
+
+
